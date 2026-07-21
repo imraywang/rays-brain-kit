@@ -39,6 +39,15 @@ python3 50-系统/40-自动化/知识仪表盘/server.py               # 打开 
 
 不装管线也可以手工往目录里放笔记，工作台照常工作。
 
+## 与 rayskills 的分工
+
+[rayskills](https://github.com/imraywang/rayskills) 里的 `ray-obsidian` skill 负责**复刻同款知识库**：完整的
+29 目录结构、内容成稿包 / 调研包 / 知识单元等 14 份模板、对已有库的零覆盖增量适配
+（结构契约：`ray-content-v1`）。本仓库负责**搭配使用的本地可视化工作台与采集自动化**。
+
+两者兼容：本仓库 bootstrap 建的最小骨架能被 ray-obsidian 识别为兼容库并补齐模板；
+ray-obsidian 初始化的库也可以直接被本工作台和管线使用。只用其中一个也完全成立。
+
 ## 设计原则
 
 - **Markdown 是唯一真源**：没有数据库，没有双向同步问题，十年后文件还在。

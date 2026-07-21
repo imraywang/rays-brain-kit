@@ -84,11 +84,11 @@ def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list
         ), created)
         write_if_missing(vault, f"{layout['knowledge_dir']}/10-概念/演示-上下文工程.md",
             "---\nkind: concept\nstatus: seed\n---\n\n# 上下文工程\n\n演示数据：一条长期知识。\n", created)
-        write_if_missing(vault, f"{layout['knowledge_dir']}/30-观点/演示-工作台是流程的镜子.md",
+        write_if_missing(vault, f"{layout['knowledge_dir']}/40-观点/演示-工作台是流程的镜子.md",
             "---\nkind: viewpoint\nstatus: seed\n---\n\n# 工作台是流程的镜子\n\n演示数据：另一种知识类型。\n", created)
         write_if_missing(vault, f"{layout['drafts_dir']}/演示草稿-知识管道.md",
             "# 我的知识管道是怎么跑起来的\n\n演示数据：一篇写作中的草稿。\n", created)
-        write_if_missing(vault, f"{layout['published_dir']}/10-公众号/演示-从收藏到成稿.md",
+        write_if_missing(vault, f"{layout['published_dir']}/30-公众号/演示-从收藏到成稿.md",
             "# 从收藏到成稿\n\n演示数据：一篇已发布的成品。\n", created)
     return created
 
