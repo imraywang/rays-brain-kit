@@ -1,0 +1,12 @@
+{
+  "name": "Ray's Brain 知识工作台",
+  "short_name": "Ray's Brain",
+  "description": "Obsidian 知识库的本地驾驶舱：总览、审核、看板与灵感速记",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#ffffff">
+  <title>Ray's Brain · 知识仪表盘</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="brand" href="#today" aria-label="Ray's Brain 首页">
+        <span class="brand-mark">🧠</span>
+        <span class="brand-copy"><strong>Ray's Brain</strong><small>本地知识工作台</small></span>
+      </a>
+
+      <p class="rail-label">工作区</p>
+      <nav class="rail-nav">
+        <a class="rail-link active" href="#today"><span>☀️</span>今日</a>
+        <a class="rail-link" href="#review"><span>📥</span>审核</a>
+        <a class="rail-link" href="#board"><span>📋</span>看板</a>
+        <a class="rail-link" href="#knowledge"><span>🌱</span>知识</a>
+      </nav>
+
+      <div class="rail-bottom">
+        <button class="rail-action" id="capture-open" type="button">
+          <span>＋</span>记下灵感
+        </button>
+        <a class="rail-action subtle" id="open-inbox" href="#">
+          <span>↗</span>打开收件箱
+        </a>
+      </div>
+    </aside>
+
+    <main id="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="today-label">个人知识工作台</p>
+          <h1>知识工作台</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="search-control" for="global-search">
+            <span aria-hidden="true">⌕</span>
+            <input id="global-search" type="search" placeholder="搜索全部笔记" autocomplete="off">
+            <kbd>⌘ K</kbd>
+          </label>
+          <button class="icon-button" id="notify-toggle" type="button" aria-label="系统通知开关" title="有新审核卡或采集异常时发系统通知">🔔</button>
+          <button class="icon-button" id="refresh" type="button" aria-label="刷新数据" title="刷新数据">↻</button>
+        </div>
+      </header>
+
+      <section class="search-tray" id="search-tray" aria-label="搜索结果" hidden>
+        <div class="search-tray-head">
+          <div>
+            <p class="eyebrow">全库搜索</p>
+            <strong id="search-summary">输入至少两个字</strong>
+          </div>
+          <label>范围
+            <select id="search-scope">
+              <option value="all">全部</option>
+              <option value="create">创作</option>
+              <option value="knowledge">知识</option>
+              <option value="sources">资料</option>
+              <option value="published">发布</option>
+            </select>
+          </label>
+        </div>
+        <div class="search-results" id="search-results"></div>
+      </section>
+
+      <div class="loading-state" id="loading-state" role="status">
+        <span></span><span></span><span></span>
+        <p>正在整理今天的工作台…</p>
+      </div>
+
+      <div id="dashboard" hidden>
+        <section class="hero" id="today">
+          <div class="hero-copy">
+            <div class="status-line">
+              <span class="health-dot" id="health-dot"></span>
+              <span id="health-label">读取中</span>
+              <span class="status-separator">/</span>
+              <span id="health-time">尚未生成日报</span>
+            </div>
+            <p class="hero-kicker">今天最值得做的一件事</p>
+            <h2 id="focus-text">—</h2>
+            <p class="hero-note" id="focus-note">系统正在找出阻力最大的环节。</p>
+          </div>
+          <div class="hero-index" aria-hidden="true">
+            <span id="hero-count">00</span>
+            <small>等待判断</small>
+          </div>
+        </section>
+
+        <section class="pipeline-section" aria-labelledby="pipeline-title">
+          <div class="section-heading compact">
+            <div>
+              <p class="eyebrow">Flow</p>
+              <h2 id="pipeline-title">🔄 知识流动，而不是堆积</h2>
+            </div>
+            <p>每个数字都能回到原笔记</p>
+          </div>
+          <div class="pipeline" id="pipeline"></div>
+          <div class="metric-ledger" id="metric-ledger"></div>
+        </section>
+
+        <section class="review-section" id="review" aria-labelledby="review-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Decision queue</p>
+              <h2 id="review-title">📥 一次只判断一条</h2>
+            </div>
+            <div class="filter-tabs" role="tablist" aria-label="审核筛选">
+              <button class="filter-tab active" type="button" data-filter="priority">高价值</button>
+              <button class="filter-tab" type="button" data-filter="cleanup">低成本清理</button>
+              <button class="filter-tab" type="button" data-filter="all">全部</button>
+            </div>
+          </div>
+
+          <div class="review-layout">
+            <article class="review-focus" id="review-focus" aria-live="polite"></article>
+            <aside class="review-queue" aria-label="待审核列表">
+              <div class="queue-head">
+                <strong id="queue-title">待判断</strong>
+                <span id="queue-progress">0 / 0</span>
+              </div>
+              <div class="queue-list" id="review-queue"></div>
+            </aside>
+          </div>
+
+          <div class="queued-block" id="queued-block" hidden>
+            <div class="subheading"><h3>已勾选，等待自动处理</h3><span id="queued-summary"></span></div>
+            <div class="queued-list" id="queued-list"></div>
+          </div>
+        </section>
+
+        <section class="board-section" id="board" aria-labelledby="board-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Progress</p>
+              <h2 id="board-title">📋 进展看板</h2>
+            </div>
+            <p>拖动前两列的卡片即可勾选或撤回；后三列展示真实进度，点卡片回到 Obsidian</p>
+          </div>
+          <div class="board" id="board-columns"></div>
+        </section>
+
+        <section class="knowledge-section" id="knowledge" aria-labelledby="knowledge-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Knowledge pulse</p>
+              <h2 id="knowledge-title">🌱 这套系统正在长成什么</h2>
+            </div>
+          </div>
+          <div class="knowledge-grid">
+            <article class="trend-panel">
+              <div class="panel-heading">
+                <div><span>审核积压</span><strong id="trend-current">—</strong></div>
+                <small>最近记录</small>
+              </div>
+              <div id="trend-chart" class="trend-chart" aria-label="审核积压趋势图"></div>
+            </article>
+            <article class="mix-panel">
+              <div class="panel-heading">
+                <div><span>长期知识构成</span><strong id="knowledge-total">—</strong></div>
+                <small>按类型</small>
+              </div>
+              <div class="knowledge-mix" id="knowledge-mix"></div>
+            </article>
+          </div>
+
+          <div class="recent-block">
+            <div class="subheading"><h3>最近动过的笔记</h3><span>继续上次的思路</span></div>
+            <div class="recent-list" id="recent-list"></div>
+          </div>
+        </section>
+
+        <footer>
+          <span>Ray's Brain · 本地运行</span>
+          <span>Markdown 仍是唯一真源</span>
+        </footer>
+      </div>
+    </main>
+  </div>
+
+  <aside class="capture-drawer" id="capture-drawer" aria-labelledby="capture-title" aria-hidden="true" inert>
+    <button class="drawer-close" id="capture-close" type="button" aria-label="关闭灵感速记">×</button>
+    <p class="eyebrow">Quick capture</p>
+    <h2 id="capture-title">先记下来，分类以后再说。</h2>
+    <form id="capture-form">
+      <label for="capture-text">灵感</label>
+      <textarea id="capture-text" rows="8" maxlength="2000" placeholder="一句判断、一个问题，或一段还没想明白的话…" required></textarea>
+      <div class="capture-meta"><span id="capture-count">0 / 2000</span><span>会追加到灵感收件箱</span></div>
+      <button class="primary-button" type="submit">记入收件箱</button>
+    </form>
+  </aside>
+
+  <div class="action-menu" id="action-menu" role="menu" aria-label="选择处理方式" hidden></div>
+  <div class="drawer-scrim" id="drawer-scrim" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+    <span id="toast-message"></span>
+    <button id="toast-action" type="button" hidden>撤销</button>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

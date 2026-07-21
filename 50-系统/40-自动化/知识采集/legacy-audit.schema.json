@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reviews"],
+  "properties": {
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "quality_score", "recommendation", "confidence", "reason",
+          "evidence_status", "evidence_notes", "strengths", "weaknesses",
+          "reusable_value", "duplicate_candidates", "merge_target",
+          "suggested_improvements"
+        ],
+        "properties": {
+          "id": {"type": "string"},
+          "quality_score": {"type": "integer", "minimum": 0, "maximum": 100},
+          "recommendation": {"type": "string", "enum": ["保留", "合并", "降级为资料", "待清理"]},
+          "confidence": {"type": "string", "enum": ["高", "中", "低"]},
+          "reason": {"type": "string"},
+          "evidence_status": {"type": "string", "enum": ["完整", "部分", "不足"]},
+          "evidence_notes": {"type": "string"},
+          "strengths": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+          "weaknesses": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+          "reusable_value": {"type": "string"},
+          "duplicate_candidates": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+          "merge_target": {"type": "string"},
+          "suggested_improvements": {"type": "array", "items": {"type": "string"}, "maxItems": 5}
+        }
+      }
+    }
+  }
+}

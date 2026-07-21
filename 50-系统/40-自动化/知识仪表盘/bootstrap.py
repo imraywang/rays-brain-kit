@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""初始化一个可直接被知识仪表盘使用的 vault 骨架。
+
+用法：
+    python3 bootstrap.py <vault路径>          # 只建目录骨架，缺什么补什么
+    python3 bootstrap.py <vault路径> --demo   # 另写入演示数据，便于第一次预览工作台
+
+既有文件一律不动，重复执行安全。目录布局读取与 server.py 相同的配置
+（同目录 config.json，或环境变量 RAYS_BRAIN_CONFIG 指定的文件）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+SKELETON_KEYS = ("review_dir", "drafts_dir", "knowledge_dir", "sources_dir", "published_dir", "archive_dir")
+
+REVIEW_CARD = """---
+kind: capture-review
+status: 待审核
+recommendation: {recommendation}
+relevance_score: {score}
+suggested_kind: {suggested_kind}
+source_url: "{source_url}"
+---
+
+# {title}
+
+## 摘要
+
+{summary}
+
+## 人工审核
+
+- [ ] 批准进入长期知识库
+- [ ] 仅保留为写作素材
+- [ ] 暂缓
+- [ ] 标记为可恢复的待清理项
+"""
+
+
+def load_layout() -> dict[str, str]:
+    spec = importlib.util.spec_from_file_location("rays_dashboard_server", HERE / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return dict(module.LAYOUT)
+
+
+def write_if_missing(vault: Path, relative: str, content: str, created: list[str]) -> None:
+    target = vault / relative
+    if target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    created.append(relative)
+
+
+def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list[str]:
+    created: list[str] = []
+    for key in SKELETON_KEYS:
+        target = vault / layout[key]
+        if not target.exists():
+            target.mkdir(parents=True)
+            created.append(layout[key] + "/")
+    write_if_missing(vault, layout["inbox_file"], "# 灵感收件箱\n", created)
+    if demo:
+        review = layout["review_dir"]
+        write_if_missing(vault, f"{review}/演示卡-AI工作流.md", REVIEW_CARD.format(
+            title="AI 工作流正在吃掉传统 SaaS 的交互层",
+            score=93, recommendation="保留", suggested_kind="viewpoint",
+            source_url="https://example.com/agent-workflows",
+            summary="演示数据：一条高价值观点。选「沉淀为知识」看它流向长期知识库。",
+        ), created)
+        write_if_missing(vault, f"{review}/演示卡-营销噪音.md", REVIEW_CARD.format(
+            title="某产品发布会的营销通稿",
+            score=42, recommendation="清理", suggested_kind="",
+            source_url="https://example.com/press-release",
+            summary="演示数据：低价值内容，适合练习「移入待清理」。",
+        ), created)
+        write_if_missing(vault, f"{layout['knowledge_dir']}/10-概念/演示-上下文工程.md",
+            "---\nkind: concept\nstatus: seed\n---\n\n# 上下文工程\n\n演示数据：一条长期知识。\n", created)
+        write_if_missing(vault, f"{layout['knowledge_dir']}/30-观点/演示-工作台是流程的镜子.md",
+            "---\nkind: viewpoint\nstatus: seed\n---\n\n# 工作台是流程的镜子\n\n演示数据：另一种知识类型。\n", created)
+        write_if_missing(vault, f"{layout['drafts_dir']}/演示草稿-知识管道.md",
+            "# 我的知识管道是怎么跑起来的\n\n演示数据：一篇写作中的草稿。\n", created)
+        write_if_missing(vault, f"{layout['published_dir']}/10-公众号/演示-从收藏到成稿.md",
+            "# 从收藏到成稿\n\n演示数据：一篇已发布的成品。\n", created)
+    return created
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="初始化知识仪表盘所需的 vault 骨架")
+    parser.add_argument("vault", help="目标 vault 路径（空目录或既有库都可以）")
+    parser.add_argument("--demo", action="store_true", help="写入演示数据，便于第一次预览工作台")
+    args = parser.parse_args()
+    vault = Path(args.vault).expanduser().resolve()
+    vault.mkdir(parents=True, exist_ok=True)
+    created = build_vault(vault, load_layout(), demo=args.demo)
+    if created:
+        print("已创建：")
+        for item in created:
+            print(f"  {item}")
+    else:
+        print("骨架已完整，没有需要补的内容。")
+    print()
+    print("启动工作台：")
+    print(f'  RAYS_BRAIN="{vault}" python3 "{HERE / "server.py"}"')
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,15 @@
+# 个人配置不进仓库（复制 config.example.json 为 config.json 后填写）
+config.json
+
+# Obsidian 工作区状态
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.trash/
+
+# 系统与运行时产物
+.DS_Store
+__pycache__/
+*.pyc
+
+# 大体积媒体只依靠云盘同步，不进 git 历史
+60-素材/

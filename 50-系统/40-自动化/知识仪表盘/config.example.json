@@ -1,0 +1,10 @@
+{
+  "review_dir": "10-创作/10-灵感/10-待评估/剪藏复核",
+  "inbox_file": "10-创作/10-灵感/inbox.md",
+  "create_dir": "10-创作",
+  "drafts_dir": "10-创作/20-草稿",
+  "knowledge_dir": "20-知识",
+  "sources_dir": "30-资料",
+  "published_dir": "40-发布",
+  "archive_dir": "90-归档"
+}

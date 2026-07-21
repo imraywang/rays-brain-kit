@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reviews"],
+  "properties": {
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "title", "recommendation", "relevance_score", "confidence",
+          "reason", "summary", "core_claims", "evidence", "counterpoints",
+          "connections", "writing_angles", "suggested_kind", "topics"
+        ],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {
+            "type": "string",
+            "description": "脱离原文也能看懂的简洁中文知识标题，不使用作者名、账号、推文编号或 URL 代替标题"
+          },
+          "recommendation": {"type": "string", "enum": ["保留", "待观察", "清理"]},
+          "relevance_score": {"type": "integer", "minimum": 0, "maximum": 100},
+          "confidence": {"type": "string", "enum": ["高", "中", "低"]},
+          "reason": {"type": "string"},
+          "summary": {"type": "string"},
+          "core_claims": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+          "evidence": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+          "counterpoints": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+          "connections": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+          "writing_angles": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+          "suggested_kind": {"type": "string", "enum": ["概念", "观点", "案例", "方法", "选题", "无"]},
+          "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 6}
+        }
+      }
+    }
+  }
+}

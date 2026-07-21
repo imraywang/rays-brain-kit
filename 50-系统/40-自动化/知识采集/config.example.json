@@ -1,0 +1,19 @@
+{
+  "x_app": "",
+  "xurl_path": "xurl",
+  "x_max_results": 100,
+  "x_bootstrap_import_latest": 5,
+  "x_article_backfill": true,
+  "mobile_inbox": "",
+  "codex_path": "codex",
+  "codex_model": "gpt-5.5",
+  "review_batch_size": 8,
+  "review_item_max_chars": 150000,
+  "review_batch_max_chars": 180000,
+  "review_enabled": true,
+  "focus_topics": [
+    "AI Agent 与工作流",
+    "个人知识库",
+    "内容生产系统"
+  ]
+}
