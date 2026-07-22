@@ -809,6 +809,12 @@ REVIEW_ACTIONS = {
     "移入可恢复的待清理区": "cleanup",
     "标记为可恢复的待清理项": "cleanup",
 }
+REVIEW_ACTION_LABELS = {
+    "knowledge": "批准进入长期知识库",
+    "writing": "仅保留为写作素材",
+    "paused": "暂缓",
+    "cleanup": "标记为可恢复的待清理项",
+}
 
 
 def checked_review_actions(text: str) -> list[str]:
@@ -817,6 +823,41 @@ def checked_review_actions(text: str) -> list[str]:
         if re.search(rf"^- \[[xX]\]\s+{re.escape(label)}\s*$", text, flags=re.M):
             checked.append(action)
     return list(dict.fromkeys(checked))
+
+
+def preserve_review_decision(previous_text: str, refreshed_text: str) -> str:
+    """A source refresh may update the analysis, but must not erase a human decision."""
+    previous_meta = parse_frontmatter(previous_text)
+    checked = checked_review_actions(previous_text)
+    action = previous_meta.get("review_action", "")
+    if action not in REVIEW_ACTION_LABELS:
+        action = checked[0] if len(checked) == 1 else ""
+    if not action:
+        return refreshed_text
+
+    selected_label = REVIEW_ACTION_LABELS[action]
+    for label in REVIEW_ACTIONS:
+        refreshed_text = re.sub(
+            rf"^- \[[ xX]\]\s+{re.escape(label)}\s*$",
+            f"- [{'x' if label == selected_label else ' '}] {label}",
+            refreshed_text,
+            flags=re.M,
+        )
+
+    if previous_meta.get("action_processed_at"):
+        preserved = {
+            key: previous_meta[key]
+            for key in (
+                "status",
+                "review_action",
+                "action_processed_at",
+                "action_error",
+                "result_file",
+            )
+            if key in previous_meta
+        }
+        refreshed_text = update_frontmatter(refreshed_text, preserved)
+    return refreshed_text
 
 
 KIND_BY_FOLDER = {
@@ -1236,6 +1277,9 @@ def write_review_card(
     review: dict[str, Any], item: dict[str, str], replacement_path: Path | None = None
 ) -> Path:
     path = replacement_path or card_path(review, item["id"])
+    previous_text = (
+        path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    )
     destination_map = {
         "概念": "20-知识/10-概念",
         "观点": "20-知识/40-观点",
@@ -1291,7 +1335,10 @@ def write_review_card(
         "- [ ] 标记为可恢复的待清理项",
         "", "> 只勾选一项。系统会自动处理，但不会自动删除原文。", "",
     ])
-    path.write_text("\n".join(lines), encoding="utf-8")
+    rendered = "\n".join(lines)
+    if previous_text:
+        rendered = preserve_review_decision(previous_text, rendered)
+    path.write_text(rendered, encoding="utf-8")
     return path
 
 

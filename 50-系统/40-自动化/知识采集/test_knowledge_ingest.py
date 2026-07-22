@@ -197,6 +197,90 @@ source_url: "https://example.com/source"
         self.assertIn("result_file:", updated)
         self.assertEqual(len(list(ingest.CONTENT_PACK_DIR.glob("*.md"))), 1)
 
+    def test_refreshing_review_preserves_processed_human_decision(self) -> None:
+        ingest.REVIEW_DIR.mkdir(parents=True)
+        card = ingest.REVIEW_DIR / "card.md"
+        card.write_text(
+            """---
+status: 已沉淀
+review_action: knowledge
+action_processed_at: "2026-07-20T21:20:06-07:00"
+action_error: ""
+result_file: "20-知识/60-方法/旧结果.md"
+---
+
+# 旧判断
+
+## 人工审核
+
+- [x] 批准进入长期知识库
+- [ ] 仅保留为写作素材
+- [ ] 暂缓
+- [ ] 标记为可恢复的待清理项
+""",
+            encoding="utf-8",
+        )
+        review = {
+            "title": "更新后的判断",
+            "recommendation": "保留",
+            "relevance_score": 90,
+            "confidence": "高",
+            "suggested_kind": "方法",
+            "topics": ["测试"],
+            "reason": "来源已更新。",
+            "summary": "新摘要。",
+            "core_claims": ["新观点"],
+            "evidence": ["新证据"],
+            "counterpoints": ["新反例"],
+            "connections": ["新连接"],
+            "writing_angles": ["新角度"],
+        }
+        item = {
+            "id": "x:123",
+            "file": "30-资料/30-X书签/source.md",
+            "content": '---\nsource: "https://example.com"\n---\n',
+        }
+
+        ingest.write_review_card(review, item, card)
+        updated = card.read_text(encoding="utf-8")
+
+        self.assertIn("# 更新后的判断", updated)
+        self.assertIn('status: "已沉淀"', updated)
+        self.assertIn('review_action: "knowledge"', updated)
+        self.assertIn('action_processed_at: "2026-07-20T21:20:06-07:00"', updated)
+        self.assertIn('result_file: "20-知识/60-方法/旧结果.md"', updated)
+        self.assertIn("- [x] 批准进入长期知识库", updated)
+        self.assertEqual(updated.count("- [x]"), 1)
+
+    def test_refreshing_review_preserves_queued_human_decision(self) -> None:
+        previous = """---
+status: 待审核
+---
+
+## 人工审核
+
+- [ ] 批准进入长期知识库
+- [x] 仅保留为写作素材
+- [ ] 暂缓
+- [ ] 标记为可恢复的待清理项
+"""
+        refreshed = """---
+status: 待审核
+---
+
+## 人工审核
+
+- [ ] 批准进入长期知识库
+- [ ] 仅保留为写作素材
+- [ ] 暂缓
+- [ ] 标记为可恢复的待清理项
+"""
+
+        updated = ingest.preserve_review_decision(previous, refreshed)
+
+        self.assertIn("- [x] 仅保留为写作素材", updated)
+        self.assertEqual(updated.count("- [x]"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
