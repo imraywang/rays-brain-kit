@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 
 HERE = Path(__file__).resolve().parent
-DASHBOARD_SCHEMA_VERSION = 4
+DASHBOARD_SCHEMA_VERSION = 5
 SERVER_STARTED_AT = datetime.now().astimezone().isoformat(timespec="seconds")
 DEFAULT_VAULT = HERE.parents[2]
 VAULT = Path(os.environ.get("RAYS_BRAIN", str(DEFAULT_VAULT))).resolve()
@@ -43,6 +43,7 @@ DEFAULT_LAYOUT = {
     "topics_dir": "10-创作/10-灵感/20-候选选题",
     "topic_reserve_dir": "10-创作/10-灵感/90-选题储备",
     "inbox_file": "10-创作/10-灵感/inbox.md",
+    "link_inbox_file": "30-资料/00-待抓取/链接收件箱.md",
     "create_dir": "10-创作",
     "writing_tasks_dir": "10-创作/20-写作任务",
     "drafts_dir": "10-创作/30-文章草稿",
@@ -82,6 +83,10 @@ def load_layout() -> dict[str, str]:
 LAYOUT = load_layout()
 REVIEW_DIR = VAULT / LAYOUT["review_dir"]
 INBOX_FILE = VAULT / LAYOUT["inbox_file"]
+LINK_INBOX_FILE = VAULT / LAYOUT["link_inbox_file"]
+# 锚定在 VAULT（而非代码目录）：指向别的 vault 运行时，队列跟着那个 vault 走
+INTENT_QUEUE_FILE = VAULT / "50-系统/40-自动化/AI任务队列.md"
+PIPELINE_LOG_FILE_NAME = "pipeline.log"
 
 
 def area_prefix(key: str) -> str:
@@ -1051,22 +1056,49 @@ def choose_review_action(rel_path: str, action: str | None) -> dict[str, object]
     }
 
 
+CAPTURE_URL_PATTERN = re.compile(r"https?://[^\s<>\"）)】]+")
+
+
 def append_capture(text: str) -> dict[str, object]:
     text = text.strip()
     if not text:
         raise ValueError("先写下一句话")
     if len(text) > 2000:
         raise ValueError("灵感太长了，请控制在 2000 字以内")
-    if not INBOX_FILE.exists():
-        raise ValueError("找不到灵感收件箱")
     now = datetime.now().astimezone()
     lines = text.splitlines()
+    match = CAPTURE_URL_PATTERN.search(lines[0])
+    if match:
+        # 首行带链接的速记直接投链接收件箱，走采集管线抓取，而不是躺在灵感箱里
+        if not LINK_INBOX_FILE.exists():
+            raise ValueError("找不到链接收件箱")
+        url = match.group(0).rstrip(".,;，。；")
+        note = (lines[0][: match.start()] + lines[0][match.end():]).strip(" -[]\t·")
+        extra = " ".join(line.strip() for line in lines[1:] if line.strip())
+        note = " ".join(part for part in (note, extra) if part)[:200]
+        entry = f"- [ ] {url}" + (f" {note}" if note else "")
+        current = read_text(LINK_INBOX_FILE).rstrip()
+        atomic_write(LINK_INBOX_FILE, current + "\n" + entry + "\n")
+        log_operation({"op": "capture-link", "url": url})
+        return {
+            "ok": True,
+            "target": "link-inbox",
+            "captured_at": now.isoformat(timespec="minutes"),
+            "url": url,
+        }
+    if not INBOX_FILE.exists():
+        raise ValueError("找不到灵感收件箱")
     entry = f"- {now.strftime('%Y-%m-%d %H:%M')} · {lines[0].strip()}"
     if len(lines) > 1:
         entry += "\n" + "\n".join(f"  {line.rstrip()}" for line in lines[1:])
     current = read_text(INBOX_FILE).rstrip()
     atomic_write(INBOX_FILE, current + "\n\n" + entry + "\n")
-    return {"ok": True, "captured_at": now.isoformat(timespec="minutes"), "text": text}
+    return {
+        "ok": True,
+        "target": "inbox",
+        "captured_at": now.isoformat(timespec="minutes"),
+        "text": text,
+    }
 
 
 IGNORED_PARTS = {".git", ".obsidian", "node_modules", "__pycache__"}
@@ -1291,6 +1323,180 @@ def promote_candidate(rel_path: str, angle: str) -> dict[str, object]:
     }
 
 
+def save_note_body(
+    rel_path: str, body: str, expected_mtime_ns: object
+) -> dict[str, object]:
+    """全文编辑只替换正文，页首属性原样保留——属性由流转和管线负责。"""
+    if len(body) > 512_000:
+        raise ValueError("正文太长，请回 Obsidian 编辑这一篇")
+    path = vault_note_path(rel_path)
+    if expected_mtime_ns is None:
+        raise ValueError("请求格式不正确")
+    try:
+        expected = int(expected_mtime_ns)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ValueError("请求格式不正确")
+    if path.stat().st_mtime_ns != expected:
+        raise ValueError("这篇笔记刚被其他程序修改过；请复制你的改动，刷新后再编辑")
+    text = read_text(path)
+    head = ""
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end >= 0:
+            head = text[: end + 5]
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
+    if body and not body.endswith("\n"):
+        body += "\n"
+    atomic_write(path, head + body)
+    log_operation({"op": "edit", "path": relative(path), "chars": len(body)})
+    return {
+        "ok": True,
+        "path": relative(path),
+        "mtime_ns": str(path.stat().st_mtime_ns),
+    }
+
+
+_MANUAL_RUN: dict[str, object] = {"proc": None, "started_at": ""}
+
+
+def manual_run_running() -> bool:
+    proc = _MANUAL_RUN["proc"]
+    return proc is not None and proc.poll() is None  # type: ignore[union-attr]
+
+
+def start_manual_run() -> dict[str, object]:
+    if manual_run_running():
+        raise ValueError("已有一次手动采集在进行中，请等它跑完")
+    if not INGEST_SCRIPT.is_file():
+        raise ValueError("找不到知识采集脚本")
+    env = {**os.environ, "RAYS_BRAIN": str(VAULT), "RAYS_BRAIN_STATE": str(STATE_HOME)}
+    log_dir = STATE_HOME / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    with (log_dir / "manual-run.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"\n===== 工作台手动采集 {started_at} =====\n")
+        handle.flush()
+        proc = subprocess.Popen(
+            [sys.executable, str(INGEST_SCRIPT), "run"],
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=str(INGEST_SCRIPT.parent),
+        )
+    _MANUAL_RUN["proc"] = proc
+    _MANUAL_RUN["started_at"] = started_at
+    log_operation({"op": "manual-run", "started_at": started_at})
+    return {"ok": True, "started_at": started_at}
+
+
+def resolve_pipeline_error(at: str, message: str) -> dict[str, object]:
+    """在管线状态里标记一条错误已解决。与 30 分钟任务并发写有极小竞态，原子替换兜底。"""
+    state_file = STATE_HOME / "state.json"
+    try:
+        data = json.loads(read_text(state_file))
+    except (OSError, json.JSONDecodeError):
+        raise ValueError("找不到管线状态文件")
+    for item in data.get("errors", []):
+        if (
+            not item.get("resolved_at")
+            and str(item.get("at", "")) == at
+            and str(item.get("message", "")) == message
+        ):
+            item["resolved_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            item["resolved_by"] = "dashboard"
+            atomic_write(state_file, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            log_operation({"op": "resolve-error", "at": at, "message": message[:120]})
+            return {"ok": True}
+    raise ValueError("这条错误已经处理过了，刷新看看")
+
+
+INTENT_ACTIONS = {"draft": "起草"}
+INTENT_QUEUE_HEADER = """---
+kind: ai-task-queue
+---
+
+# AI 任务队列
+
+工作台排入的 AI 协作请求。用 Claude Code（/ray）处理：完成一条勾掉一条，并把产物链接补在行尾。此文件由工作台追加，人工可随时编辑。
+
+## 待处理
+"""
+
+
+def pending_intents(limit: int = 20) -> list[str]:
+    text = try_read(INTENT_QUEUE_FILE)
+    if not text:
+        return []
+    items = [
+        line[6:].strip()
+        for line in text.splitlines()
+        if line.startswith("- [ ] ")
+    ]
+    return items[-limit:]
+
+
+def queue_intent(rel_path: str, action: str) -> dict[str, object]:
+    label = INTENT_ACTIONS.get(action)
+    if not label:
+        raise ValueError("不支持这类 AI 请求")
+    path = vault_note_path(rel_path)
+    rel = relative(path)
+    if not rel.startswith(area_prefix("writing_tasks_dir")):
+        raise ValueError("目前只支持给写作任务排队起草")
+    marker = f"[[{rel[:-3]}]]"
+    text = try_read(INTENT_QUEUE_FILE) or ""
+    for line in text.splitlines():
+        if line.startswith("- [ ] ") and marker in line and label in line:
+            raise ValueError("这篇已经在队列里等着了")
+    if not text.strip():
+        text = INTENT_QUEUE_HEADER
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+    entry = f"- [ ] {stamp} · {label} · {marker}"
+    atomic_write(INTENT_QUEUE_FILE, text.rstrip() + "\n" + entry + "\n")
+    log_operation({"op": "intent", "path": rel, "action": action})
+    return {"ok": True, "queued": entry, "queue_path": relative(INTENT_QUEUE_FILE)}
+
+
+def pipeline_status() -> dict[str, object]:
+    runtime = load_runtime_state()
+    errors = [
+        {
+            "at": str(item.get("at", "")),
+            "message": str(item.get("message", "")),
+        }
+        for item in runtime.get("errors", [])
+        if not item.get("resolved_at")
+    ]
+    try:
+        last_activity = (
+            datetime.fromtimestamp((STATE_HOME / "state.json").stat().st_mtime)
+            .astimezone()
+            .isoformat(timespec="minutes")
+        )
+    except OSError:
+        last_activity = ""
+    tail: list[str] = []
+    try:
+        tail = (
+            (STATE_HOME / "logs" / PIPELINE_LOG_FILE_NAME)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()[-40:]
+        )
+    except OSError:
+        pass
+    return {
+        "ok": True,
+        "last_activity": last_activity,
+        "pending_sources": len(runtime.get("pending_sources", [])),
+        "errors": errors[-20:],
+        "log_tail": tail,
+        "manual_run_running": manual_run_running(),
+        "manual_run_started_at": str(_MANUAL_RUN["started_at"]),
+        "intents": pending_intents(),
+        "intent_queue_path": relative(INTENT_QUEUE_FILE) if INTENT_QUEUE_FILE.exists() else "",
+    }
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "RaysBrainDashboard/1.0"
 
@@ -1383,6 +1589,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self.error_json(str(exc), HTTPStatus.NOT_FOUND)
             return
+        if parsed.path == "/api/pipeline":
+            self.send_json(pipeline_status())
+            return
         if parsed.path == "/api/asset":
             params = parse_qs(parsed.query)
             try:
@@ -1444,7 +1653,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ValueError:
             self.error_json("请求长度不正确")
             return
-        if length <= 0 or length > 16_384:
+        if length <= 0 or length > 1_048_576:
             self.error_json("请求内容过长")
             return
         try:
@@ -1477,6 +1686,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(
                     promote_candidate(
                         str(payload.get("path", "")), str(payload.get("angle", ""))
+                    )
+                )
+            elif parsed.path == "/api/note/save":
+                self.send_json(
+                    save_note_body(
+                        str(payload.get("path", "")),
+                        str(payload.get("body", "")),
+                        payload.get("expected_mtime_ns"),
+                    )
+                )
+            elif parsed.path == "/api/pipeline/resolve-error":
+                self.send_json(
+                    resolve_pipeline_error(
+                        str(payload.get("at", "")), str(payload.get("message", ""))
+                    )
+                )
+            elif parsed.path == "/api/pipeline/run":
+                self.send_json(start_manual_run())
+            elif parsed.path == "/api/intent":
+                self.send_json(
+                    queue_intent(
+                        str(payload.get("path", "")), str(payload.get("action", ""))
                     )
                 )
             else:

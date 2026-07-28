@@ -794,6 +794,67 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
 .md .wikilink:hover { text-decoration: none; border-bottom-style: solid; }
 .md .wikilink.embed { display: inline-block; margin: 2px 0; padding: 3px 9px; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--surface-raised); border-bottom-style: solid; }
 
+/* ---- 抽屉内编辑 ---- */
+
+.note-editor { display: flex; flex-direction: column; gap: 10px; min-height: 60vh; }
+.note-editor textarea {
+  flex: 1;
+  min-height: 52vh;
+  padding: 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  color: var(--ink);
+  background: var(--surface-raised);
+  font-family: ui-monospace, SFMono-Regular, Menlo, "PingFang SC", monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  resize: vertical;
+}
+.note-editor textarea:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 2px rgba(35, 131, 226, .16); }
+.note-editor-bar { display: flex; align-items: center; gap: 8px; }
+.note-editor-bar span { flex: 1; color: var(--muted); font-size: 10.5px; }
+.primary-button.slim { min-height: 32px; margin-top: 0; padding: 0 16px; }
+
+/* ---- 管线面板 ---- */
+
+.pipe-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+.pipe-run { display: flex; align-items: center; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
+.pipe-run span { color: var(--muted); font-size: 11px; }
+.pipe-heading { margin: 18px 0 8px; font-size: 13px; font-weight: 650; }
+.pipe-errors { display: grid; gap: 6px; }
+.pipe-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 11px;
+  border: 1px solid #f0c8c6;
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+}
+.pipe-error small { color: var(--muted); font-size: 10px; }
+.pipe-error p { margin: 2px 0 0; font-size: 12px; line-height: 1.5; word-break: break-all; }
+.pipe-error .ghost-button { flex: none; min-height: 28px; padding: 0 10px; font-size: 11.5px; }
+.pipe-intents { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.8; }
+.pipe-empty { margin: 0; color: var(--muted); font-size: 12px; }
+.pipe-note { margin: 8px 0 0; color: var(--muted); font-size: 11.5px; }
+.pipe-note a { color: var(--accent); text-decoration: none; }
+.pipe-log {
+  margin: 0;
+  max-height: 300px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: #f6f5f2;
+  color: var(--muted-strong);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
 /* ---- 看板卡片补充 ---- */
 
 .kprop.status { color: var(--purple); background: var(--purple-soft); }

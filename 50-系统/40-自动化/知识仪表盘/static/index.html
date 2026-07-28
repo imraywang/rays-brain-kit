@@ -206,8 +206,8 @@
     <h2 id="capture-title">先记下来，分类以后再说。</h2>
     <form id="capture-form">
       <label for="capture-text">灵感</label>
-      <textarea id="capture-text" rows="8" maxlength="2000" placeholder="一句判断、一个问题，或一段还没想明白的话…" required></textarea>
-      <div class="capture-meta"><span id="capture-count">0 / 2000</span><span>会追加到灵感收件箱</span></div>
+      <textarea id="capture-text" rows="8" maxlength="2000" placeholder="一句判断、一个问题，或直接贴一条链接…" required></textarea>
+      <div class="capture-meta"><span id="capture-count">0 / 2000</span><span>文字进灵感收件箱；带链接自动投链接收件箱</span></div>
       <button class="primary-button" type="submit">记入收件箱</button>
     </form>
   </aside>
@@ -217,6 +217,7 @@
     <div class="note-bar">
       <button class="note-nav" id="note-back" type="button" aria-label="返回上一篇" hidden>←</button>
       <span class="note-path" id="note-path"></span>
+      <button class="note-nav" id="note-edit" type="button" aria-label="编辑正文" title="编辑正文（页首属性不受影响）">✎</button>
       <a class="note-nav" id="note-obsidian" href="#" aria-label="在 Obsidian 打开" title="在 Obsidian 打开">↗</a>
       <button class="note-nav" id="note-close" type="button" aria-label="关闭阅读面板">×</button>
     </div>
@@ -226,6 +227,26 @@
       <div class="note-chips" id="note-chips"></div>
       <div class="note-actions" id="note-actions"></div>
       <article class="md" id="note-body"></article>
+      <div class="note-editor" id="note-editor" hidden>
+        <textarea id="note-editor-text" spellcheck="false" aria-label="正文编辑器"></textarea>
+        <div class="note-editor-bar">
+          <span>只改正文，页首属性不动 · ⌘S 保存 · Esc 取消</span>
+          <button class="ghost-button" id="note-editor-cancel" type="button">取消</button>
+          <button class="primary-button slim" id="note-editor-save" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <aside class="note-drawer" id="pipeline-drawer" aria-labelledby="pipeline-title-h" aria-hidden="true" inert>
+    <div class="note-bar">
+      <span class="note-path">50-系统 · 采集管线</span>
+      <button class="note-nav" id="pipeline-close" type="button" aria-label="关闭管线面板">×</button>
+    </div>
+    <div class="note-scroll">
+      <p class="eyebrow">Pipeline</p>
+      <h2 class="note-title" id="pipeline-title-h">采集管线</h2>
+      <div id="pipeline-body"></div>
     </div>
   </aside>
 

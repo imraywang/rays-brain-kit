@@ -54,10 +54,17 @@ source_url: "https://example.com"
 """,
             encoding="utf-8",
         )
+        self.link_inbox = self.vault / "30-资料/00-待抓取/链接收件箱.md"
+        self.link_inbox.parent.mkdir(parents=True, exist_ok=True)
+        self.link_inbox.write_text("# 链接收件箱\n\n## 待处理\n", encoding="utf-8")
         self.patchers = [
             mock.patch.object(dashboard, "VAULT", self.vault),
             mock.patch.object(dashboard, "REVIEW_DIR", self.review_dir),
             mock.patch.object(dashboard, "INBOX_FILE", self.inbox),
+            mock.patch.object(dashboard, "LINK_INBOX_FILE", self.link_inbox),
+            mock.patch.object(
+                dashboard, "INTENT_QUEUE_FILE", self.vault / "50-系统/40-自动化/AI任务队列.md"
+            ),
             mock.patch.object(dashboard, "STATE_HOME", self.vault / ".state"),
         ]
         for patcher in self.patchers:
@@ -236,7 +243,7 @@ source_url: "https://example.com"
             encoding="utf-8",
         )
         payload = dashboard.dashboard_payload()
-        self.assertEqual(payload["schema_version"], 4)
+        self.assertEqual(payload["schema_version"], 5)
         self.assertTrue(payload["server_started_at"])
         self.assertIn("topic-candidate", payload["board_protocol"])
         self.assertIn("content-feedback", payload["board_protocol"])
@@ -558,6 +565,88 @@ source_url: "https://example.com"
         self.assertIn(rel, command)
         env = run.call_args.kwargs["env"]
         self.assertEqual(env["RAYS_BRAIN"], str(self.vault))
+
+    # ---- 阶段 3：编辑与速记分流 ----
+
+    def test_capture_with_url_goes_to_link_inbox(self) -> None:
+        result = dashboard.append_capture("https://example.com/post 一条备注")
+        self.assertEqual(result["target"], "link-inbox")
+        text = self.link_inbox.read_text(encoding="utf-8")
+        self.assertIn("- [ ] https://example.com/post 一条备注", text)
+        self.assertNotIn("example.com", self.inbox.read_text(encoding="utf-8"))
+        plain = dashboard.append_capture("一条普通灵感")
+        self.assertEqual(plain["target"], "inbox")
+        self.assertIn("一条普通灵感", self.inbox.read_text(encoding="utf-8"))
+
+    def test_save_note_body_keeps_frontmatter_and_detects_conflict(self) -> None:
+        rel = "10-创作/10-灵感/10-待评估/剪藏复核/test.md"
+        note = dashboard.note_payload(rel)
+        result = dashboard.save_note_body(rel, "\n# 一张测试卡\n\n改写后的正文。", note["mtime_ns"])
+        self.assertTrue(result["ok"])
+        text = self.card.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nkind: capture-review\n"))
+        self.assertIn("改写后的正文。", text)
+        self.assertNotIn("这是摘要", text)
+        with self.assertRaisesRegex(ValueError, "修改过"):
+            dashboard.save_note_body(rel, "again", note["mtime_ns"])
+        with self.assertRaisesRegex(ValueError, "请求格式"):
+            dashboard.save_note_body(rel, "again", None)
+
+    # ---- 阶段 4：管线与意图队列 ----
+
+    def test_queue_intent_appends_once_per_task(self) -> None:
+        task_dir = self.vault / dashboard.LAYOUT["writing_tasks_dir"]
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "任务.md").write_text(
+            "---\nkind: content-pack\nstatus: active\n---\n\n# 任务\n", encoding="utf-8"
+        )
+        rel = "10-创作/20-写作任务/任务.md"
+        result = dashboard.queue_intent(rel, "draft")
+        self.assertTrue(result["ok"])
+        queue_text = dashboard.INTENT_QUEUE_FILE.read_text(encoding="utf-8")
+        self.assertIn("kind: ai-task-queue", queue_text)
+        self.assertIn("起草 · [[10-创作/20-写作任务/任务]]", queue_text)
+        self.assertEqual(len(dashboard.pending_intents()), 1)
+        with self.assertRaisesRegex(ValueError, "队列里"):
+            dashboard.queue_intent(rel, "draft")
+        with self.assertRaisesRegex(ValueError, "写作任务"):
+            dashboard.queue_intent(
+                "10-创作/10-灵感/10-待评估/剪藏复核/test.md", "draft"
+            )
+        with self.assertRaisesRegex(ValueError, "不支持"):
+            dashboard.queue_intent(rel, "publish")
+
+    def test_resolve_pipeline_error_marks_state(self) -> None:
+        state_dir = self.vault / ".state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "errors": [
+                        {"at": "2026-07-28T10:00:00", "message": "x sync failed"},
+                        {"at": "2026-07-28T11:00:00", "message": "other", "resolved_at": "done"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = dashboard.resolve_pipeline_error("2026-07-28T10:00:00", "x sync failed")
+        self.assertTrue(result["ok"])
+        data = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertTrue(data["errors"][0]["resolved_at"])
+        self.assertEqual(data["errors"][0]["resolved_by"], "dashboard")
+        status = dashboard.pipeline_status()
+        self.assertEqual(status["errors"], [])
+        with self.assertRaisesRegex(ValueError, "处理过"):
+            dashboard.resolve_pipeline_error("2026-07-28T10:00:00", "x sync failed")
+
+    def test_manual_run_refuses_reentry(self) -> None:
+        fake_proc = mock.Mock()
+        fake_proc.poll.return_value = None
+        with mock.patch.dict(dashboard._MANUAL_RUN, {"proc": fake_proc, "started_at": "x"}):
+            self.assertTrue(dashboard.manual_run_running())
+            with self.assertRaisesRegex(ValueError, "进行中"):
+                dashboard.start_manual_run()
 
     def test_promote_surfaces_pipeline_error(self) -> None:
         self._write_topic()

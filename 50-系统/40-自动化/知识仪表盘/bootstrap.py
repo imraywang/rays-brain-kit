@@ -87,6 +87,12 @@ def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list
             target.mkdir(parents=True)
             created.append(layout[key] + "/")
     write_if_missing(vault, layout["inbox_file"], "# 灵感收件箱\n", created)
+    write_if_missing(
+        vault,
+        layout["link_inbox_file"],
+        "# 链接收件箱\n\n临时看到但来不及处理的链接放这里，每行一个：`- [ ] https://… 备注`。\n\n## 待处理\n",
+        created,
+    )
     if demo:
         review = layout["review_dir"]
         write_if_missing(vault, f"{review}/演示卡-AI工作流.md", REVIEW_CARD.format(

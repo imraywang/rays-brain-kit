@@ -7,11 +7,12 @@ const state = {
   eventTimer: null,
   undo: null,
   dragging: null,
-  note: { open: false, follow: false, stack: [], current: null },
+  note: { open: false, follow: false, editing: false, stack: [], current: null },
   angleTarget: null,
+  pipelineErrors: [],
 };
 
-const EXPECTED_SCHEMA_VERSION = 4;
+const EXPECTED_SCHEMA_VERSION = 5;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -220,9 +221,9 @@ function renderRail() {
   const pipeline = d.pipeline || {};
   const errors = Number(pipeline.unresolved_errors || 0);
   const rows = [`
-    <span class="rail-sys${errors ? " alert" : ""}" title="采集管线状态${pipeline.pending ? `，待处理 ${pipeline.pending} 条` : ""}">
+    <a class="rail-sys link${errors ? " alert" : ""}" href="#" data-open-pipeline="1" title="打开采集管线面板${pipeline.pending ? `，待处理 ${pipeline.pending} 条` : ""}">
       <span>⟳</span>采集 ${pipeline.last_activity ? escapeHtml(formatRecent(pipeline.last_activity)) : "未运行"}${errors ? ` · ${errors} 个错误` : ""}
-    </span>`];
+    </a>`];
   (d.reports || []).forEach((report) => rows.push(`
     <a class="rail-sys link" href="#" data-note-path="${escapeHtml(report.path)}"><span>📄</span>${escapeHtml(report.title)}</a>
   `));
@@ -809,6 +810,8 @@ async function markFeedbackReviewed(path) {
   await runTransition(note, transition);
 }
 
+const TASK_KINDS = ["writing-task", "content-task", "content-pack"];
+
 function noteContextActions(note) {
   const buttons = [];
   const status = (note.frontmatter?.status || "").trim();
@@ -823,6 +826,9 @@ function noteContextActions(note) {
   }
   if (note.kind === "topic-candidate" && ["candidate", "parked"].includes(status)) {
     buttons.push(`<button class="decision-button primary" type="button" data-drawer-promote="1">立项为写作任务…</button>`);
+  }
+  if (TASK_KINDS.includes(note.kind) && status !== "cancelled") {
+    buttons.push(`<button class="decision-button topic" type="button" data-drawer-intent="draft">排入 AI 起草队列</button>`);
   }
   const proto = state.data?.board_protocol?.[note.kind];
   if (proto) {
@@ -862,10 +868,27 @@ function bindNoteActions(note) {
   }
   const promote = $("#note-actions [data-drawer-promote]");
   if (promote) promote.addEventListener("click", () => openAngleDialog(note.path, note.title));
+  const intent = $("#note-actions [data-drawer-intent]");
+  if (intent) {
+    intent.addEventListener("click", async () => {
+      intent.disabled = true;
+      try {
+        await api("/api/intent", {
+          method: "POST",
+          body: JSON.stringify({ path: note.path, action: intent.dataset.drawerIntent }),
+        });
+        showToast("已排入 AI 任务队列，下次 /ray 会话会处理");
+      } catch (error) {
+        showToast(error.message);
+        intent.disabled = false;
+      }
+    });
+  }
 }
 
 function renderNoteDrawer(note) {
   state.note.current = note;
+  exitEditMode();
   const meta = note.frontmatter || {};
   $("#note-path").textContent = note.path.length > 58 ? `…${note.path.slice(-58)}` : note.path;
   $("#note-obsidian").href = note.obsidian_uri;
@@ -897,6 +920,7 @@ async function openNote(ref, { push = true, follow = false } = {}) {
     ? `path=${encodeURIComponent(ref.path)}`
     : `link=${encodeURIComponent(ref.link || "")}`;
   try {
+    if (pipelineDrawerOpenState()) closePipelineDrawer();
     const note = await api(`/api/note?${query}`);
     if (push && state.note.current?.path !== note.path) state.note.stack.push(note.path);
     if (!push && state.note.stack.length) state.note.stack[state.note.stack.length - 1] = note.path;
@@ -919,13 +943,16 @@ async function openNote(ref, { push = true, follow = false } = {}) {
 }
 
 function closeNoteDrawer() {
+  exitEditMode();
   const drawer = $("#note-drawer");
   drawer.classList.remove("open");
   drawer.setAttribute("aria-hidden", "true");
   drawer.setAttribute("inert", "");
-  $("#note-scrim").classList.remove("visible");
-  setTimeout(() => { $("#note-scrim").hidden = true; }, 250);
-  state.note = { open: false, follow: false, stack: [], current: null };
+  if (!pipelineDrawerOpenState()) {
+    $("#note-scrim").classList.remove("visible");
+    setTimeout(() => { $("#note-scrim").hidden = true; }, 250);
+  }
+  state.note = { open: false, follow: false, editing: false, stack: [], current: null };
 }
 
 async function noteDrawerBack() {
@@ -933,6 +960,166 @@ async function noteDrawerBack() {
   state.note.stack.pop();
   const previous = state.note.stack[state.note.stack.length - 1];
   await openNote({ path: previous }, { push: false });
+}
+
+/* ---- 抽屉内编辑：只动正文，页首属性交给流转和管线 ---- */
+
+function enterEditMode() {
+  const note = state.note.current;
+  if (!note) return;
+  state.note.editing = true;
+  $("#note-body").hidden = true;
+  $("#note-actions").hidden = true;
+  $("#note-editor").hidden = false;
+  const editor = $("#note-editor-text");
+  editor.value = note.body;
+  editor.focus();
+}
+
+function exitEditMode() {
+  state.note.editing = false;
+  $("#note-editor").hidden = true;
+  $("#note-body").hidden = false;
+  $("#note-actions").hidden = false;
+}
+
+async function saveNoteEdit() {
+  const note = state.note.current;
+  if (!note || !state.note.editing) return;
+  const button = $("#note-editor-save");
+  button.disabled = true;
+  try {
+    await api("/api/note/save", {
+      method: "POST",
+      body: JSON.stringify({
+        path: note.path,
+        body: $("#note-editor-text").value,
+        expected_mtime_ns: note.mtime_ns,
+      }),
+    });
+    await openNote({ path: note.path }, { push: false, follow: state.note.follow });
+    await loadDashboard({ quiet: true });
+    showToast("已保存");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---- 管线面板 ---- */
+
+function pipelineDrawerOpenState() {
+  return $("#pipeline-drawer").classList.contains("open");
+}
+
+function openOverlayDrawer(id) {
+  const drawer = $(id);
+  drawer.classList.add("open");
+  drawer.setAttribute("aria-hidden", "false");
+  drawer.removeAttribute("inert");
+  $("#note-scrim").hidden = false;
+  requestAnimationFrame(() => $("#note-scrim").classList.add("visible"));
+}
+
+function closePipelineDrawer() {
+  const drawer = $("#pipeline-drawer");
+  drawer.classList.remove("open");
+  drawer.setAttribute("aria-hidden", "true");
+  drawer.setAttribute("inert", "");
+  if (!noteDrawerOpenState()) {
+    $("#note-scrim").classList.remove("visible");
+    setTimeout(() => { $("#note-scrim").hidden = true; }, 250);
+  }
+}
+
+async function openPipelineDrawer() {
+  if (noteDrawerOpenState()) closeNoteDrawer();
+  openOverlayDrawer("#pipeline-drawer");
+  $("#pipeline-body").innerHTML = `<p class="board-empty">正在读取管线状态…</p>`;
+  await refreshPipelineDrawer();
+}
+
+async function refreshPipelineDrawer() {
+  try {
+    const status = await api("/api/pipeline");
+    renderPipelineDrawer(status);
+  } catch (error) {
+    $("#pipeline-body").innerHTML = `<p class="board-empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderPipelineDrawer(status) {
+  state.pipelineErrors = status.errors || [];
+  const running = status.manual_run_running;
+  const blocks = [];
+  blocks.push(`
+    <div class="pipe-stats">
+      <div class="ledger-item"><span>最近活动</span><strong>${escapeHtml(status.last_activity ? formatRecent(status.last_activity) : "未运行")}</strong></div>
+      <div class="ledger-item"><span>待处理来源</span><strong>${Number(status.pending_sources) || 0}</strong></div>
+      <div class="ledger-item"><span>未解决错误</span><strong>${state.pipelineErrors.length}</strong></div>
+    </div>
+    <div class="pipe-run">
+      <button class="primary-button slim" type="button" id="pipeline-run" ${running ? "disabled" : ""}>
+        ${running ? "手动采集进行中…" : "立即采集"}
+      </button>
+      <span>定时任务每 30 分钟也会跑一轮，通常不用手动</span>
+    </div>`);
+  if (state.pipelineErrors.length) {
+    blocks.push(`
+      <h3 class="pipe-heading">未解决错误</h3>
+      <div class="pipe-errors">
+        ${state.pipelineErrors.map((item, index) => `
+          <div class="pipe-error">
+            <div><small>${escapeHtml(item.at)}</small><p>${escapeHtml(item.message)}</p></div>
+            <button class="ghost-button" type="button" data-resolve-error="${index}">已解决</button>
+          </div>`).join("")}
+      </div>`);
+  }
+  const intents = status.intents || [];
+  blocks.push(`
+    <h3 class="pipe-heading">AI 任务队列（${intents.length}）</h3>
+    ${intents.length
+      ? `<ul class="pipe-intents">${intents.map((line) => `<li>${mdInline(line)}</li>`).join("")}</ul>`
+      : `<p class="pipe-empty">队列为空。在写作任务的阅读面板里点「排入 AI 起草队列」。</p>`}
+    ${status.intent_queue_path
+      ? `<p class="pipe-note"><a href="#" data-note-path="${escapeHtml(status.intent_queue_path)}">打开队列文件 →</a>（用 Claude Code 的 /ray 会话处理，完成一条勾掉一条）</p>`
+      : ""}`);
+  if ((status.log_tail || []).length) {
+    blocks.push(`
+      <h3 class="pipe-heading">管线日志（最近 ${status.log_tail.length} 行）</h3>
+      <pre class="pipe-log">${escapeHtml(status.log_tail.join("\n"))}</pre>`);
+  }
+  $("#pipeline-body").innerHTML = blocks.join("");
+  const run = $("#pipeline-run");
+  if (run) run.addEventListener("click", async () => {
+    run.disabled = true;
+    try {
+      await api("/api/pipeline/run", { method: "POST", body: JSON.stringify({}) });
+      showToast("采集已在后台启动，结果会自动刷新进工作台");
+      await refreshPipelineDrawer();
+    } catch (error) {
+      showToast(error.message);
+      run.disabled = false;
+    }
+  });
+  $$("#pipeline-body [data-resolve-error]").forEach((button) => button.addEventListener("click", async () => {
+    const item = state.pipelineErrors[Number(button.dataset.resolveError)];
+    if (!item) return;
+    button.disabled = true;
+    try {
+      await api("/api/pipeline/resolve-error", {
+        method: "POST",
+        body: JSON.stringify({ at: item.at, message: item.message }),
+      });
+      showToast("已标记解决");
+      await refreshPipelineDrawer();
+      await loadDashboard({ quiet: true });
+    } catch (error) {
+      showToast(error.message);
+      button.disabled = false;
+    }
+  }));
 }
 
 function syncNoteDrawerWithReview() {
@@ -1002,7 +1189,7 @@ function connectEvents() {
 }
 
 async function refreshFromEvents() {
-  const busy = $("#capture-drawer").classList.contains("open") || !$("#action-menu").hidden || !$("#angle-dialog").hidden || state.dragging;
+  const busy = $("#capture-drawer").classList.contains("open") || !$("#action-menu").hidden || !$("#angle-dialog").hidden || state.dragging || state.note.editing;
   if (busy) {
     clearTimeout(state.eventTimer);
     state.eventTimer = setTimeout(refreshFromEvents, 3000);
@@ -1134,11 +1321,13 @@ function bindEvents() {
     button.disabled = true;
     button.textContent = "正在记入…";
     try {
-      await api("/api/capture", { method: "POST", body: JSON.stringify({ text }) });
+      const result = await api("/api/capture", { method: "POST", body: JSON.stringify({ text }) });
       $("#capture-text").value = "";
       $("#capture-count").textContent = "0 / 2000";
       closeCapture();
-      showToast("灵感已记入收件箱");
+      showToast(result.target === "link-inbox"
+        ? "链接已投入采集队列，半小时内自动抓取"
+        : "灵感已记入收件箱");
       await loadDashboard({ quiet: true });
     } catch (error) {
       showToast(error.message);
@@ -1166,10 +1355,17 @@ function bindEvents() {
       $("#global-search").focus();
       return;
     }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s" && state.note.editing) {
+      event.preventDefault();
+      saveNoteEdit();
+      return;
+    }
     if (event.key === "Escape") {
-      if (!$("#angle-dialog").hidden) closeAngleDialog();
+      if (state.note.editing) exitEditMode();
+      else if (!$("#angle-dialog").hidden) closeAngleDialog();
       else if (!$("#action-menu").hidden) hideActionMenu();
       else if (noteDrawerOpenState()) closeNoteDrawer();
+      else if (pipelineDrawerOpenState()) closePipelineDrawer();
       else if ($("#capture-drawer").classList.contains("open")) closeCapture();
       else {
         $("#global-search").value = "";
@@ -1217,6 +1413,12 @@ function bindEvents() {
 
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element)) return;
+    const pipelineLink = event.target.closest("[data-open-pipeline]");
+    if (pipelineLink) {
+      event.preventDefault();
+      openPipelineDrawer();
+      return;
+    }
     const noteLink = event.target.closest("[data-note-path]");
     if (noteLink) {
       event.preventDefault();
@@ -1231,8 +1433,21 @@ function bindEvents() {
   });
 
   $("#note-close").addEventListener("click", closeNoteDrawer);
-  $("#note-scrim").addEventListener("click", closeNoteDrawer);
-  $("#note-back").addEventListener("click", noteDrawerBack);
+  $("#note-scrim").addEventListener("click", () => {
+    if (noteDrawerOpenState()) closeNoteDrawer();
+    if (pipelineDrawerOpenState()) closePipelineDrawer();
+  });
+  $("#note-back").addEventListener("click", () => {
+    exitEditMode();
+    noteDrawerBack();
+  });
+  $("#note-edit").addEventListener("click", () => {
+    if (state.note.editing) exitEditMode();
+    else enterEditMode();
+  });
+  $("#note-editor-cancel").addEventListener("click", exitEditMode);
+  $("#note-editor-save").addEventListener("click", saveNoteEdit);
+  $("#pipeline-close").addEventListener("click", closePipelineDrawer);
   $("#angle-cancel").addEventListener("click", closeAngleDialog);
   $("#angle-scrim").addEventListener("click", closeAngleDialog);
   $("#angle-dialog").addEventListener("submit", (event) => {
