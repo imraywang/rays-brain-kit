@@ -19,6 +19,9 @@
         { "from": "candidate", "to": "closed", "label": "关闭选题", "confirm": "关闭后不再出现在候选池；如有新事实需要重新开启。确定关闭？" },
         { "from": "parked", "to": "closed", "label": "关闭选题", "confirm": "关闭后不再出现在候选池；如有新事实需要重新开启。确定关闭？" },
         { "from": "closed", "to": "candidate", "label": "重新开启为候选" },
+        { "from": "active", "to": "partially-published", "label": "本次角度已发布，仍有剩余角度" },
+        { "from": "active", "to": "closed", "label": "本次角度已发布，没有剩余角度", "confirm": "关闭后这个选题不再出现在候选或可续写列表。确定？" },
+        { "from": "partially-published", "to": "active", "label": "撤回到已立项" },
         { "from": "partially-published", "to": "closed", "label": "不再续写，关闭", "confirm": "剩余角度将不再出现在可续写列表。确定关闭？" }
       ]
     },
