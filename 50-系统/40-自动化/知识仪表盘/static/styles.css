@@ -913,6 +913,10 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
 }
 .angle-dialog input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 2px rgba(35, 131, 226, .16); }
 .publish-dialog { width: min(560px, calc(100vw - 32px)); top: min(14vh, 120px); }
+
+.confirm-dialog { width: min(420px, calc(100vw - 32px)); top: min(26vh, 220px); z-index: 97; }
+.confirm-dialog + .modal-scrim, #confirm-scrim { z-index: 96; }
+.confirm-message { margin: 8px 0 4px; font-size: 13.5px; line-height: 1.65; color: var(--ink); }
 .publish-fields { display: grid; gap: 12px; }
 .publish-fields label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
 .publish-fields select,

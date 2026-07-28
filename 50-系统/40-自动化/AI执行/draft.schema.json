@@ -1,7 +1,8 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["title", "summary", "body_markdown"],
+  "required": ["title", "summary", "body_markdown", "facts_used", "open_questions"],
   "properties": {
     "title": { "type": "string" },
     "summary": { "type": "string" },

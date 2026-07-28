@@ -785,7 +785,7 @@ function reverseTransitionOf(kind, from, to) {
 }
 
 async function runTransition(note, transition) {
-  if (transition.confirm && !window.confirm(transition.confirm)) return;
+  if (transition.confirm && !(await workbenchConfirm(transition.confirm, transition.label))) return;
   try {
     const result = await transitionNote(note.path, transition.to, note.mtime_ns);
     if (reverseTransitionOf(note.kind, transition.from, transition.to)) {
@@ -878,7 +878,10 @@ function bindNoteActions(note) {
   const draft = $("#note-actions [data-drawer-draft]");
   if (draft) {
     draft.addEventListener("click", async () => {
-      if (!window.confirm("Codex 会读取成稿包与关联材料，在后台起草几分钟，产出一篇标记为 ai-draft 的待审初稿。开始？")) return;
+      if (!(await workbenchConfirm(
+        "Codex 会按 ray-writer 的写作规范读取成稿包与关联材料，在后台起草几分钟，产出一篇标记为 ai-draft 的待审初稿。",
+        "开始起草",
+      ))) return;
       draft.disabled = true;
       try {
         await api("/api/intent/execute", {
@@ -1165,6 +1168,30 @@ function syncNoteDrawerWithReview() {
   }
 }
 
+/* ---- 原生确认弹窗（替代 window.confirm）---- */
+
+let confirmResolver = null;
+
+function workbenchConfirm(message, confirmLabel = "确认") {
+  return new Promise((resolve) => {
+    if (confirmResolver) confirmResolver(false);
+    confirmResolver = resolve;
+    $("#confirm-message").textContent = message;
+    $("#confirm-ok").textContent = confirmLabel;
+    $("#confirm-scrim").hidden = false;
+    $("#confirm-dialog").hidden = false;
+    setTimeout(() => $("#confirm-ok").focus(), 60);
+  });
+}
+
+function settleConfirm(result) {
+  $("#confirm-dialog").hidden = true;
+  $("#confirm-scrim").hidden = true;
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  if (resolve) resolve(result);
+}
+
 /* ---- 登记发布弹窗 ---- */
 
 function localDatetimeValue(date = new Date()) {
@@ -1327,7 +1354,7 @@ function connectEvents() {
 }
 
 async function refreshFromEvents() {
-  const busy = $("#capture-drawer").classList.contains("open") || !$("#action-menu").hidden || !$("#angle-dialog").hidden || !$("#publish-dialog").hidden || state.dragging || state.note.editing;
+  const busy = $("#capture-drawer").classList.contains("open") || !$("#action-menu").hidden || !$("#angle-dialog").hidden || !$("#publish-dialog").hidden || !$("#confirm-dialog").hidden || state.dragging || state.note.editing;
   if (busy) {
     clearTimeout(state.eventTimer);
     state.eventTimer = setTimeout(refreshFromEvents, 3000);
@@ -1503,7 +1530,8 @@ function bindEvents() {
       return;
     }
     if (event.key === "Escape") {
-      if (state.note.editing) exitEditMode();
+      if (!$("#confirm-dialog").hidden) settleConfirm(false);
+      else if (state.note.editing) exitEditMode();
       else if (!$("#publish-dialog").hidden) closePublishDialog();
       else if (!$("#angle-dialog").hidden) closeAngleDialog();
       else if (!$("#action-menu").hidden) hideActionMenu();
@@ -1518,7 +1546,7 @@ function bindEvents() {
     }
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.target instanceof Element && event.target.closest("input, textarea, select")) return;
-    if (!$("#action-menu").hidden || !$("#angle-dialog").hidden || !$("#publish-dialog").hidden) return;
+    if (!$("#action-menu").hidden || !$("#angle-dialog").hidden || !$("#publish-dialog").hidden || !$("#confirm-dialog").hidden) return;
     const key = event.key.toLowerCase();
     if (key === "u" && state.undo) {
       event.preventDefault();
@@ -1600,6 +1628,9 @@ function bindEvents() {
   $("#publish-cancel").addEventListener("click", closePublishDialog);
   $("#publish-scrim").addEventListener("click", closePublishDialog);
   $("#publish-again").addEventListener("click", reopenPublishDialog);
+  $("#confirm-ok").addEventListener("click", () => settleConfirm(true));
+  $("#confirm-cancel").addEventListener("click", () => settleConfirm(false));
+  $("#confirm-scrim").addEventListener("click", () => settleConfirm(false));
   $("#publish-dialog").addEventListener("submit", (event) => {
     event.preventDefault();
     submitPublishDialog();
