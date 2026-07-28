@@ -195,6 +195,38 @@ def writer_specs() -> str:
     return "\n\n".join(blocks)
 
 
+def style_sample() -> str:
+    """取最近一篇已发布长文当语气锚点。规则描述语气，样本才定得住语域。"""
+    published = VAULT / "40-发布/10-X长文"
+
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    try:
+        articles = sorted(published.glob("*.md"), key=mtime, reverse=True)
+    except OSError:
+        articles = []
+    for path in articles:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = text
+        if body.startswith("---\n"):
+            end = body.find("\n---\n", 4)
+            if end >= 0:
+                body = body[end + 5 :]
+        body = body.strip()
+        # 太短的不是完整长文（索引页或存根），锚不住语域
+        if len(body) < 2_000:
+            continue
+        return f"样本：{rel(path)}\n\n{clip(body, 6_000)}"
+    return "（暂无已发布文章可作样本，按写作规范里的语气要求执行）"
+
+
 def build_prompt(task_path: Path, meta: dict[str, str], materials: str) -> str:
     template = PROMPT_FILE.read_text(encoding="utf-8")
     specs = writer_specs()
@@ -205,6 +237,7 @@ def build_prompt(task_path: Path, meta: dict[str, str], materials: str) -> str:
         .replace("{{selected_angle}}", meta.get("selected_angle", "见成稿包"))
         .replace("{{platform}}", meta.get("platform", "X Article + 微信公众号"))
         .replace("{{writer_specs}}", specs)
+        .replace("{{style_sample}}", style_sample())
         .replace("{{materials}}", materials)
     )
 
