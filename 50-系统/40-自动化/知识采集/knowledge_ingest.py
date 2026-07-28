@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import html
 import json
@@ -43,6 +44,19 @@ REVIEW_RECORD_DIR = VAULT / "90-归档/20-审核记录/剪藏复核"
 KNOWLEDGE_DIR = VAULT / "20-知识"
 LEGACY_ACTIONS_SCRIPT = SYSTEM_DIR / "legacy_actions.py"
 TOPIC_FRESHNESS_DAYS = {"强时效": 3, "中时效": 14, "常青": 30}
+ARTICLE_DRAFT_DIR = VAULT / "10-创作/30-文章草稿"
+ORAL_DRAFT_DIR = VAULT / "10-创作/20-口播草稿"
+PUBLISHED_ROOT = VAULT / "40-发布"
+FEEDBACK_REL_PREFIX = "40-发布/00-内容反馈"
+RECORD_PUBLISHED_SCRIPT = SYSTEM_DIR.parent / "发布归档/record_published.py"
+# X Article 发布检测只在草稿推入后 72 小时内轮询；超窗口留给工作台「登记发布」表单。
+X_ARTICLE_DETECT_WINDOW_HOURS = 72
+# 草稿 kind → (正式稿子目录, 正式稿 kind)。口径抄自知识仪表盘 record_publication。
+X_PUBLISH_ARCHIVE_RULES = {
+    "draft": ("10-X长文", "article-published"),
+    "article-draft": ("10-X长文", "article-published"),
+    "oral-script": ("50-口播视频", "video-published"),
+}
 
 
 def now_local() -> str:
@@ -791,6 +805,341 @@ def repair_x(state: dict[str, Any], config: dict[str, Any]) -> dict[str, int]:
     return {"repaired": repaired, "unavailable": unavailable}
 
 
+# ---------------------------------------------------------- X Article 发布检测
+# 草稿推入 X 草稿箱后，人会在平台上手动点发布；发布成功的 Article 会以帖子形式
+# 出现在自己的时间线上。这里定期比对时间线，把「已发布」自动登记回知识库。
+# 检测失败或不确定时只记日志不动文件，工作台「登记发布」表单是人工兜底。
+
+
+def parse_iso_moment(value: str) -> datetime | None:
+    raw = str(value or "").strip().strip('"')
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.astimezone()
+
+
+def normalize_title(value: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", str(value or ""))).strip()
+
+
+def draft_display_title(text: str, meta: dict[str, str]) -> str:
+    title = meta.get("title", "").strip()
+    if title:
+        return title
+    match = re.search(r"^# (.+)$", text, flags=re.M)
+    return match.group(1).strip() if match else ""
+
+
+def resolve_vault_wikilink(value: str) -> Path | None:
+    match = re.match(r"\s*\"?\[\[([^\]|#]+)", value or "")
+    target = match.group(1).strip() if match else ""
+    if not target:
+        return None
+    candidate = VAULT / (target if target.endswith(".md") else target + ".md")
+    try:
+        candidate = candidate.resolve()
+        candidate.relative_to(VAULT)
+    except (OSError, ValueError):
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def x_article_pending_drafts(now: datetime) -> list[dict[str, Any]]:
+    """严格门控：只有 72 小时内推过 X 草稿箱、还没确认发布的草稿才允许触发 API 调用。"""
+    pending: list[dict[str, Any]] = []
+    for root in (ARTICLE_DRAFT_DIR, ORAL_DRAFT_DIR):
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*.md")):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            meta = parse_frontmatter(text)
+            if meta.get("x_article_status", "").strip() != "draft":
+                continue
+            saved_at = parse_iso_moment(meta.get("x_article_saved_at", ""))
+            if saved_at is None:
+                log(f"x article detect: 无法解析 x_article_saved_at，跳过 {rel(path)}")
+                continue
+            if now - saved_at > timedelta(hours=X_ARTICLE_DETECT_WINDOW_HOURS):
+                continue
+            title = draft_display_title(text, meta)
+            if not title:
+                log(f"x article detect: 草稿没有标题，无法匹配，跳过 {rel(path)}")
+                continue
+            pending.append({"path": path, "meta": meta, "title": title, "saved_at": saved_at})
+    return pending
+
+
+def fetch_x_own_posts(config: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """一次调用拉自己最近的帖子，覆盖本轮全部待确认草稿。"""
+    me = run_xurl_request(config, ["/2/users/me"])
+    data = me.get("data", {})
+    user_id = str(data.get("id", ""))
+    username = str(data.get("username", "")).strip()
+    if not user_id or not username:
+        raise RuntimeError("X API did not return the authenticated user id/username")
+    max_results = max(5, min(100, int(config.get("x_timeline_max_results", 50))))
+    endpoint = (
+        f"/2/users/{user_id}/tweets?max_results={max_results}"
+        "&exclude=replies,retweets"
+        "&tweet.fields=article,created_at"
+    )
+    payload = run_xurl_request(config, [endpoint])
+    return username, payload.get("data", [])
+
+
+# 发布前人常会在 X 编辑器里微调标题（实测：「…1 份可直接用的模板」发布成
+# 「…1 份模板」），精确匹配追不上这种改动，所以放一档高相似度兜底。
+# 阈值取 0.75：副标题级别的删改仍在 0.85 以上，只共享主标题的两篇约 0.5。
+X_ARTICLE_TITLE_SIMILARITY = 0.75
+
+
+def match_x_article_post(
+    item: dict[str, Any], posts: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str]:
+    """帖子时间晚于 x_article_saved_at 且 Article 标题匹配；精确命中优先于
+    相似命中，无论哪一档都要求唯一，多条命中算不确定，留给人工登记。"""
+    wanted = normalize_title(item["title"])
+    exact: list[dict[str, Any]] = []
+    fuzzy: list[dict[str, Any]] = []
+    for post in posts:
+        title = normalize_title(post.get("article", {}).get("title", ""))
+        if not title:
+            continue
+        created = parse_iso_moment(post.get("created_at", ""))
+        if created is None or created <= item["saved_at"]:
+            continue
+        if title == wanted:
+            exact.append(post)
+        elif (
+            difflib.SequenceMatcher(None, wanted, title).ratio()
+            >= X_ARTICLE_TITLE_SIMILARITY
+        ):
+            fuzzy.append(post)
+    pool = exact or fuzzy
+    if not pool:
+        return None, "not-found"
+    if len(pool) > 1:
+        return None, "ambiguous"
+    return pool[0], ""
+
+
+def find_published_by_content_id(content_id: str) -> Path | None:
+    if not content_id or not PUBLISHED_ROOT.exists():
+        return None
+    for path in sorted(PUBLISHED_ROOT.rglob("*.md")):
+        if rel(path).startswith(FEEDBACK_REL_PREFIX):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if parse_frontmatter(text).get("content_id", "") == content_id:
+            return path
+    return None
+
+
+def resolve_published_article(meta: dict[str, str]) -> Path | None:
+    article = resolve_vault_wikilink(meta.get("published_file", ""))
+    if article is not None and rel(article).startswith("40-发布/"):
+        return article
+    return find_published_by_content_id(meta.get("content_id", "").strip())
+
+
+def ensure_published_article(
+    draft_path: Path, text: str, meta: dict[str, str], dry_run: bool
+) -> tuple[Path, bool]:
+    """找到草稿对应的正式稿；缺正式稿时先归档正式稿（口径同仪表盘 record_publication）。"""
+    article = resolve_published_article(meta)
+    if article is not None:
+        return article, False
+    rule = X_PUBLISH_ARCHIVE_RULES.get(meta.get("kind", "").strip())
+    if rule is None:
+        raise RuntimeError(f"kind={meta.get('kind', '')!r} 不在正式稿归档规则里")
+    subdir, published_kind = rule
+    target = PUBLISHED_ROOT / subdir / draft_path.name
+    if target.exists():
+        raise RuntimeError(f"40-发布/{subdir} 已有同名文件但 content_id 对不上，留给人工确认")
+    if not dry_run:
+        updated = update_frontmatter(
+            text,
+            {
+                "kind": published_kind,
+                "status": "published",
+                "draft_source": f"[[{rel(draft_path)[:-3]}]]",
+            },
+            render=frontmatter_value,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(updated, encoding="utf-8")
+    return target, True
+
+
+def run_record_published(article: Path, url: str, published_at: str, dry_run: bool) -> str:
+    """record_published.py 会校验公开地址（拒绝草稿编辑器地址）并完成正式稿与源头书签归档。"""
+    if not RECORD_PUBLISHED_SCRIPT.is_file():
+        raise RuntimeError(f"找不到发布归档脚本：{RECORD_PUBLISHED_SCRIPT}")
+    cmd = [
+        sys.executable, str(RECORD_PUBLISHED_SCRIPT),
+        "--article", rel(article), "--platform", "x",
+        "--url", url, "--published-at", published_at,
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        env={**os.environ, "RAYS_BRAIN": str(VAULT)},
+        cwd=str(RECORD_PUBLISHED_SCRIPT.parent),
+    )
+    if proc.returncode != 0:
+        detail = " / ".join(line.strip() for line in proc.stderr.splitlines() if line.strip())
+        raise RuntimeError(detail[-500:] or "record_published failed")
+    return proc.stdout
+
+
+def writeback_draft_and_pack(
+    draft_path: Path, article: Path, url: str, published_at: str, dry_run: bool
+) -> list[str]:
+    """把发布结果回写草稿与成稿包；已是 published 的字段不重写，人工填过的不覆盖。"""
+    link = f"[[{rel(article)[:-3]}]]"
+    updated: list[str] = []
+    text = draft_path.read_text(encoding="utf-8")
+    meta = parse_frontmatter(text)
+    updates: dict[str, str] = {}
+    if meta.get("x_article_status", "").strip() != "published":
+        updates["x_article_status"] = "published"
+    if url and meta.get("x_article_url", "").strip() != url:
+        updates["x_article_url"] = url
+    if published_at and not meta.get("x_article_published_at", "").strip():
+        updates["x_article_published_at"] = published_at
+    if meta.get("status", "").strip() != "published":
+        updates["status"] = "published"
+    if meta.get("published_file", "").strip().strip('"') != link:
+        updates["published_file"] = link
+    if updates:
+        if not dry_run:
+            draft_path.write_text(
+                update_frontmatter(text, updates, render=frontmatter_value),
+                encoding="utf-8",
+            )
+        updated.append(rel(draft_path))
+    pack = resolve_vault_wikilink(meta.get("content_pack", ""))
+    if pack is not None:
+        try:
+            pack_text = pack.read_text(encoding="utf-8")
+            if parse_frontmatter(pack_text).get("status", "").strip() != "published":
+                if not dry_run:
+                    pack.write_text(
+                        update_frontmatter(
+                            pack_text,
+                            {"status": "published", "published_file": link},
+                            render=frontmatter_value,
+                        ),
+                        encoding="utf-8",
+                    )
+                updated.append(rel(pack))
+        except (OSError, ValueError):
+            pass
+    return updated
+
+
+def handle_x_article_hit(item: dict[str, Any], url: str, published_at: str, dry_run: bool) -> None:
+    path = item["path"]
+    text = path.read_text(encoding="utf-8")
+    meta = parse_frontmatter(text)
+    article, created = ensure_published_article(path, text, meta, dry_run)
+    if dry_run and created:
+        log(f"x article detect dry-run: 会先归档正式稿 {rel(article)} 再登记 {url}")
+    else:
+        report = run_record_published(article, url, published_at, dry_run)
+        for line in report.splitlines():
+            if line.strip():
+                log(f"record_published: {line.rstrip()}")
+    updated = writeback_draft_and_pack(path, article, url, published_at, dry_run)
+    prefix = "x article detect dry-run: 检测到已发布" if dry_run else "x article detect: 已登记发布"
+    log(f"{prefix} {rel(path)} → {url}（回写 {', '.join(updated) or '无需改动'}）")
+
+
+def detect_x_article_publications(config: dict[str, Any], dry_run: bool = False) -> dict[str, int]:
+    result = {"pending": 0, "reconciled": 0, "published": 0, "unmatched": 0, "errors": 0}
+    now = datetime.now().astimezone()
+    drafts = x_article_pending_drafts(now)
+    if not drafts:
+        return result
+    remaining: list[dict[str, Any]] = []
+    for item in drafts:
+        # 先本地对账：正式稿已经登记过 X 发布（比如走了工作台表单），
+        # 只需把草稿这头的门关上，不必再调 API。
+        article = resolve_published_article(item["meta"])
+        if article is not None:
+            ameta = parse_frontmatter(article.read_text(encoding="utf-8", errors="replace"))
+            if ameta.get("x_article_status", "").strip() == "published":
+                updated = writeback_draft_and_pack(
+                    item["path"],
+                    article,
+                    ameta.get("x_article_url", "").strip(),
+                    ameta.get("x_article_published_at", "").strip(),
+                    dry_run,
+                )
+                result["reconciled"] += 1
+                suffix = "（dry-run 未写入）" if dry_run else ""
+                log(
+                    f"x article detect: 正式稿已登记过发布，关闭草稿检测门 "
+                    f"{rel(item['path'])}（回写 {', '.join(updated) or '无需改动'}）{suffix}"
+                )
+                continue
+        remaining.append(item)
+    result["pending"] = len(remaining)
+    if not remaining:
+        return result
+    username, posts = fetch_x_own_posts(config)
+    claimed: set[str] = set()
+    for item in remaining:
+        post, reason = match_x_article_post(item, posts)
+        if post is not None and str(post["id"]) in claimed:
+            # 一条帖子只可能对应一篇文章；被两篇草稿同时匹配到就是不确定。
+            log(
+                f"x article detect: 帖子已归属本轮另一篇草稿，不确定，留给人工登记 "
+                f"{rel(item['path'])}"
+            )
+            result["unmatched"] += 1
+            continue
+        if post is None:
+            if reason == "ambiguous":
+                log(
+                    f"x article detect: 标题匹配到多条帖子，不确定，留给人工登记 "
+                    f"{rel(item['path'])}"
+                )
+            result["unmatched"] += 1
+            continue
+        created = parse_iso_moment(post.get("created_at", ""))
+        if created is None:
+            log(f"x article detect: 帖子缺少 created_at，留给人工登记 {rel(item['path'])}")
+            result["unmatched"] += 1
+            continue
+        url = x_source_url(str(post["id"]), username)
+        # 匹配成功就占住这条帖子：即使登记失败，也不能让下一篇草稿接盘。
+        claimed.add(str(post["id"]))
+        try:
+            handle_x_article_hit(item, url, created.isoformat(timespec="seconds"), dry_run)
+            result["published"] += 1
+        except Exception as exc:
+            result["errors"] += 1
+            log(f"x article detect: 登记发布失败，留给人工登记 {rel(item['path'])}: {exc}")
+    if result["unmatched"]:
+        log(f"x article detect: {result['unmatched']} 篇草稿本轮未发现已发布帖子")
+    return result
+
+
 class ArticleExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -1115,7 +1464,23 @@ def parse_frontmatter(text: str) -> dict[str, str]:
     return result
 
 
-def update_frontmatter(text: str, updates: dict[str, str]) -> str:
+# 草稿和成稿包是人工维护的文件：状态枚举一向裸值，链接和时间戳一向带引号。
+# 渲染口径抄自 发布归档/record_published.py 的 render_value，两边 diff 才一致。
+FRONTMATTER_BARE_CHAR = re.compile(r"[\w.\- ]|[^\x00-\x7f]", re.UNICODE)
+
+
+def frontmatter_value(value: str) -> str:
+    if (
+        value
+        and value == value.strip()
+        and not value.startswith("-")
+        and all(FRONTMATTER_BARE_CHAR.fullmatch(char) for char in value)
+    ):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def update_frontmatter(text: str, updates: dict[str, str], render=yaml_string) -> str:
     if not text.startswith("---\n"):
         raise ValueError("审核卡缺少页首属性")
     end = text.find("\n---\n", 4)
@@ -1129,7 +1494,7 @@ def update_frontmatter(text: str, updates: dict[str, str]) -> str:
         key = line.split(":", 1)[0].strip()
         positions[key] = index
     for key, value in updates.items():
-        rendered = f"{key}: {yaml_string(value)}"
+        rendered = f"{key}: {render(value)}"
         if key in positions:
             lines[positions[key]] = rendered
         else:
@@ -2516,11 +2881,17 @@ def main() -> None:
             "promote",
             "backfill-topics",
             "run",
+            "detect-x-articles",
             "status",
         ],
     )
     parser.add_argument("target", nargs="?", help="promote 时传入候选选题的 vault 相对路径")
     parser.add_argument("--angle", default="", help="promote 时明确本篇文章采用的角度")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="detect-x-articles 时只打印会做什么，不写任何文件",
+    )
     args = parser.parse_args()
     if args.command == "status":
         print(json.dumps(status(load_state()), ensure_ascii=False, indent=2))
@@ -2542,6 +2913,8 @@ def main() -> None:
         result = sync_only(state, config)
     elif args.command == "repair-x":
         result = repair_x(state, config)
+    elif args.command == "detect-x-articles":
+        result = detect_x_article_publications(config, dry_run=args.dry_run)
     elif args.command == "review":
         result = {
             "actions": process_review_actions(state),
@@ -2559,6 +2932,17 @@ def main() -> None:
         actions_before = process_review_actions(state)
         legacy_actions_before = process_legacy_actions()
         result = sync_only(state, config)
+        try:
+            result["x_articles"] = detect_x_article_publications(config)
+            for error in state["errors"]:
+                if error.get("message", "").startswith(
+                    "x article detect failed:"
+                ) and not error.get("resolved_at"):
+                    error["resolved_at"] = now_local()
+        except Exception as exc:
+            message = f"x article detect failed: {exc}"
+            state["errors"].append({"at": now_local(), "message": message})
+            log(message)
         if config.get("review_enabled", False):
             try:
                 result["reviewed"] = review_pending(state, config)

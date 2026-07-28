@@ -3,6 +3,7 @@
   "xurl_path": "xurl",
   "x_max_results": 100,
   "x_bootstrap_import_latest": 5,
+  "x_timeline_max_results": 50,
   "x_article_backfill": true,
   "mobile_inbox": "",
   "codex_path": "codex",

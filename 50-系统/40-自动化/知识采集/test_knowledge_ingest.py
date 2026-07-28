@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1297,6 +1297,256 @@ class MobileShareRewriteTests(unittest.TestCase):
         self.assertEqual([p.name for p in cards_after], [cards[0].name])
         self.assertIn(
             "processing_status: processed", cards_after[0].read_text(encoding="utf-8")
+        )
+
+
+class XArticlePublishDetectTests(unittest.TestCase):
+    """X Article 发布检测：严格门控、精确匹配、命中才登记、失败或不确定只记日志。"""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        # 生产环境的 VAULT 在 import 时就 resolve 过；这里保持同口径，
+        # 否则 macOS 的 /var → /private/var 符号链接会让 wikilink 解析判成越界。
+        self.root = Path(self.temp.name).resolve()
+        self.saved = {
+            "VAULT": ingest.VAULT,
+            "ARTICLE_DRAFT_DIR": ingest.ARTICLE_DRAFT_DIR,
+            "ORAL_DRAFT_DIR": ingest.ORAL_DRAFT_DIR,
+            "PUBLISHED_ROOT": ingest.PUBLISHED_ROOT,
+            "LOG_DIR": ingest.LOG_DIR,
+        }
+        ingest.VAULT = self.root
+        ingest.ARTICLE_DRAFT_DIR = self.root / "10-创作/30-文章草稿"
+        ingest.ORAL_DRAFT_DIR = self.root / "10-创作/20-口播草稿"
+        ingest.PUBLISHED_ROOT = self.root / "40-发布"
+        ingest.LOG_DIR = self.root / "logs"
+        ingest.ARTICLE_DRAFT_DIR.mkdir(parents=True)
+        ingest.ORAL_DRAFT_DIR.mkdir(parents=True)
+        (self.root / "40-发布/10-X长文").mkdir(parents=True)
+        self.now = datetime.now().astimezone()
+
+    def tearDown(self) -> None:
+        for name, value in self.saved.items():
+            setattr(ingest, name, value)
+        self.temp.cleanup()
+
+    def write_draft(
+        self,
+        name: str = "2026-07-27-测试长文.md",
+        *,
+        title: str = "多智能体怎么分工：一份可直接用的模板",
+        saved_hours_ago: float = 2.0,
+        x_status: str = "draft",
+        with_pack: bool = False,
+        directory: Path | None = None,
+    ) -> Path:
+        lines = [
+            "---",
+            "kind: draft",
+            "status: draft",
+            f'title: "{title}"',
+            "content_id: article-test-1",
+        ]
+        if with_pack:
+            pack = self.root / "10-创作/20-写作任务/测试成稿包.md"
+            pack.parent.mkdir(parents=True, exist_ok=True)
+            pack.write_text(
+                "---\nkind: content-pack\nstatus: drafting\n---\n\n# 测试成稿包\n",
+                encoding="utf-8",
+            )
+            lines.append('content_pack: "[[10-创作/20-写作任务/测试成稿包]]"')
+        if x_status:
+            saved = (self.now - timedelta(hours=saved_hours_ago)).isoformat(
+                timespec="seconds"
+            )
+            lines.append(f"x_article_status: {x_status}")
+            lines.append(f"x_article_saved_at: {saved}")
+        lines += ["---", "", f"# {title}", "", "正文。"]
+        path = (directory or ingest.ARTICLE_DRAFT_DIR) / name
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def article_post(
+        self, title: str, hours_ago: float, post_id: str = "2082000000000000001"
+    ) -> dict:
+        created = (self.now - timedelta(hours=hours_ago)).astimezone(timezone.utc)
+        return {
+            "id": post_id,
+            "created_at": created.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "article": {"title": title},
+        }
+
+    def xurl_stub(self, posts: list[dict]) -> tuple[list[str], object]:
+        calls: list[str] = []
+
+        def fake(config: dict, args: list[str]) -> dict:
+            calls.append(args[0])
+            if args[0] == "/2/users/me":
+                return {"data": {"id": "42", "username": "tester"}}
+            return {"data": posts}
+
+        return calls, fake
+
+    def detect(self, posts: list[dict], dry_run: bool = False) -> tuple[dict, list[str]]:
+        calls, fake = self.xurl_stub(posts)
+        with patch.object(ingest, "run_xurl_request", fake):
+            result = ingest.detect_x_article_publications({}, dry_run=dry_run)
+        return result, calls
+
+    def test_stale_or_absent_drafts_never_call_api(self) -> None:
+        self.write_draft("过窗口.md", saved_hours_ago=100)
+        self.write_draft("没推过X.md", x_status="")
+        self.write_draft("已发布.md", x_status="published")
+        result, calls = self.detect([self.article_post("多智能体怎么分工：一份可直接用的模板", 1)])
+        self.assertEqual(calls, [])
+        self.assertEqual(result["pending"], 0)
+        self.assertEqual(result["published"], 0)
+
+    def test_unmatched_draft_only_logs_and_keeps_files(self) -> None:
+        path = self.write_draft(directory=ingest.ORAL_DRAFT_DIR)
+        result, calls = self.detect([self.article_post("另一篇文章的标题", 1)])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["unmatched"], 1)
+        self.assertIn("x_article_status: draft", path.read_text(encoding="utf-8"))
+        self.assertEqual(list((self.root / "40-发布/10-X长文").glob("*.md")), [])
+
+    def test_post_published_before_saved_at_does_not_match(self) -> None:
+        item = {
+            "title": "同名标题",
+            "saved_at": self.now - timedelta(hours=2),
+        }
+        post, reason = ingest.match_x_article_post(
+            item, [self.article_post("同名标题", 5)]
+        )
+        self.assertIsNone(post)
+        self.assertEqual(reason, "not-found")
+
+    def test_title_edited_at_publish_still_matches_by_similarity(self) -> None:
+        # 实测案例：发布前把「…1 份可直接用的模板」精简成「…1 份模板」。
+        item = {
+            "title": "多智能体怎么分工：3 种角色、4 条边界、1 份可直接用的模板",
+            "saved_at": self.now - timedelta(hours=2),
+        }
+        post, reason = ingest.match_x_article_post(
+            item,
+            [self.article_post("多智能体怎么分工：3 种角色、4 条边界、1 份模板", 1)],
+        )
+        self.assertIsNotNone(post)
+        self.assertEqual(reason, "")
+
+    def test_only_sharing_the_main_title_is_not_similar_enough(self) -> None:
+        item = {
+            "title": "多智能体怎么分工：3 种角色、4 条边界、1 份可直接用的模板",
+            "saved_at": self.now - timedelta(hours=2),
+        }
+        post, reason = ingest.match_x_article_post(
+            item, [self.article_post("多智能体怎么分工：为什么大多数人第一步就错了", 1)]
+        )
+        self.assertIsNone(post)
+        self.assertEqual(reason, "not-found")
+
+    def test_exact_match_beats_similar_match(self) -> None:
+        item = {
+            "title": "同名标题：完整副标题",
+            "saved_at": self.now - timedelta(hours=2),
+        }
+        post, reason = ingest.match_x_article_post(
+            item,
+            [
+                self.article_post("同名标题：完整副标", 1, "2082000000000000005"),
+                self.article_post("同名标题：完整副标题", 1, "2082000000000000006"),
+            ],
+        )
+        self.assertEqual(reason, "")
+        self.assertEqual(post["id"], "2082000000000000006")
+
+    def test_ambiguous_matches_are_left_for_manual_registration(self) -> None:
+        path = self.write_draft()
+        posts = [
+            self.article_post("多智能体怎么分工：一份可直接用的模板", 1, "2082000000000000001"),
+            self.article_post("多智能体怎么分工：一份可直接用的模板", 0.5, "2082000000000000002"),
+        ]
+        result, _ = self.detect(posts)
+        self.assertEqual(result["unmatched"], 1)
+        self.assertEqual(result["published"], 0)
+        self.assertIn("x_article_status: draft", path.read_text(encoding="utf-8"))
+
+    def test_detected_publication_archives_records_and_closes_gate(self) -> None:
+        draft = self.write_draft(with_pack=True)
+        result, _ = self.detect(
+            [self.article_post("多智能体怎么分工：一份可直接用的模板", 1)]
+        )
+        self.assertEqual(result["published"], 1, result)
+
+        article = self.root / "40-发布/10-X长文/2026-07-27-测试长文.md"
+        self.assertTrue(article.is_file())
+        article_text = article.read_text(encoding="utf-8")
+        self.assertIn("kind: article-published", article_text)
+        self.assertIn("x_article_status: published", article_text)
+        self.assertIn(
+            'x_article_url: "https://x.com/tester/status/2082000000000000001"',
+            article_text,
+        )
+
+        draft_text = draft.read_text(encoding="utf-8")
+        self.assertIn("x_article_status: published", draft_text)
+        self.assertIn("status: published", draft_text)
+        self.assertIn('published_file: "[[40-发布/10-X长文/2026-07-27-测试长文]]"', draft_text)
+
+        pack_text = (self.root / "10-创作/20-写作任务/测试成稿包.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("status: published", pack_text)
+        self.assertIn('published_file: "[[40-发布/10-X长文/2026-07-27-测试长文]]"', pack_text)
+
+        self.assertTrue(list((self.root / "40-发布/00-内容反馈").glob("*.md")))
+
+        # 门已关：下一轮不再调 API
+        result_again, calls_again = self.detect([])
+        self.assertEqual(calls_again, [])
+        self.assertEqual(result_again["pending"], 0)
+
+    def test_dry_run_reports_but_writes_nothing(self) -> None:
+        draft = self.write_draft(with_pack=True)
+        before = draft.read_text(encoding="utf-8")
+        result, _ = self.detect(
+            [self.article_post("多智能体怎么分工：一份可直接用的模板", 1)], dry_run=True
+        )
+        self.assertEqual(result["published"], 1)
+        self.assertEqual(draft.read_text(encoding="utf-8"), before)
+        self.assertEqual(list((self.root / "40-发布/10-X长文").glob("*.md")), [])
+        self.assertIn(
+            "status: drafting",
+            (self.root / "10-创作/20-写作任务/测试成稿包.md").read_text(encoding="utf-8"),
+        )
+
+    def test_already_recorded_article_closes_gate_without_api(self) -> None:
+        article = self.root / "40-发布/10-X长文/正式稿.md"
+        article.write_text(
+            "---\n"
+            "kind: article-published\n"
+            "status: published\n"
+            "x_article_status: published\n"
+            'x_article_url: "https://x.com/tester/status/2082000000000000009"\n'
+            'x_article_published_at: "2026-07-28T10:00:00+00:00"\n'
+            "---\n\n# 正式稿\n",
+            encoding="utf-8",
+        )
+        draft = self.write_draft()
+        draft.write_text(
+            draft.read_text(encoding="utf-8").replace(
+                "content_id: article-test-1",
+                'content_id: article-test-1\npublished_file: "[[40-发布/10-X长文/正式稿]]"',
+            ),
+            encoding="utf-8",
+        )
+        result, calls = self.detect([])
+        self.assertEqual(calls, [])
+        self.assertEqual(result["reconciled"], 1)
+        draft_text = draft.read_text(encoding="utf-8")
+        self.assertIn("x_article_status: published", draft_text)
+        self.assertIn(
+            'x_article_url: "https://x.com/tester/status/2082000000000000009"', draft_text
         )
 
 
