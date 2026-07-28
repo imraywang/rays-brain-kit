@@ -57,6 +57,11 @@ source_url: "https://example.com"
         self.link_inbox = self.vault / "30-资料/00-待抓取/链接收件箱.md"
         self.link_inbox.parent.mkdir(parents=True, exist_ok=True)
         self.link_inbox.write_text("# 链接收件箱\n\n## 待处理\n", encoding="utf-8")
+        # 立项前会确认采集脚本真实存在；给个占位文件让测试不依赖部署位置
+        # （skill 资产只带仪表盘目录，没有知识采集），真正的调用已被 mock。
+        self.ingest_script = self.vault / "知识采集/knowledge_ingest.py"
+        self.ingest_script.parent.mkdir(parents=True, exist_ok=True)
+        self.ingest_script.write_text("# 测试占位\n", encoding="utf-8")
         self.patchers = [
             mock.patch.object(dashboard, "VAULT", self.vault),
             mock.patch.object(dashboard, "REVIEW_DIR", self.review_dir),
@@ -65,6 +70,7 @@ source_url: "https://example.com"
             mock.patch.object(
                 dashboard, "INTENT_QUEUE_FILE", self.vault / "50-系统/40-自动化/AI任务队列.md"
             ),
+            mock.patch.object(dashboard, "INGEST_SCRIPT", self.ingest_script),
             mock.patch.object(dashboard, "STATE_HOME", self.vault / ".state"),
         ]
         for patcher in self.patchers:
