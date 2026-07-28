@@ -901,6 +901,39 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
   background: var(--surface-raised);
 }
 .angle-dialog input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 2px rgba(35, 131, 226, .16); }
+.publish-dialog { width: min(560px, calc(100vw - 32px)); top: min(14vh, 120px); }
+.publish-fields { display: grid; gap: 12px; }
+.publish-fields label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
+.publish-fields select,
+.publish-fields input {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  color: var(--ink);
+  background: var(--surface-raised);
+  font-size: 13px;
+}
+.publish-fields select:focus,
+.publish-fields input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 2px rgba(35, 131, 226, .16); }
+.publish-note { margin: 0; color: var(--muted); font-size: 10.5px; }
+.publish-report {
+  margin: 8px 0 0;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  font-family: ui-monospace, SFMono-Regular, Menlo, "PingFang SC", monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .angle-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .angle-buttons .primary-button { min-height: 34px; min-width: 128px; margin-top: 0; }
 .ghost-button { min-height: 34px; padding: 0 14px; border: 1px solid var(--rule); border-radius: var(--radius-sm); color: var(--muted-strong); background: #fff; cursor: pointer; }

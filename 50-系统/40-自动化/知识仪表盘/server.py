@@ -35,6 +35,7 @@ STATIC_DIR = HERE / "static"
 REVIEW_PROTOCOL_FILE = HERE.parent / "review_protocol.json"
 BOARD_PROTOCOL_FILE = HERE.parent / "board_protocol.json"
 INGEST_SCRIPT = HERE.parent / "知识采集" / "knowledge_ingest.py"
+RECORD_SCRIPT = HERE.parent / "发布归档" / "record_published.py"
 STATE_HOME = Path(
     os.environ.get("RAYS_BRAIN_STATE", str(Path.home() / ".local/state/rays-brain"))
 )
@@ -1171,14 +1172,20 @@ def note_payload(rel_path: str = "", link: str = "") -> dict[str, object]:
         path = resolved
     text = read_text(path)
     meta = parse_frontmatter(text)
+    rel = relative(path)
+    can_record_publish = (
+        rel.startswith(area_prefix("published_dir"))
+        and not rel.startswith(area_prefix("feedback_dir"))
+    ) or meta.get("kind", "") in PUBLISH_ARCHIVE_RULES
     return {
         "ok": True,
-        "path": relative(path),
+        "path": rel,
         "title": title_of(path, text),
         "frontmatter": meta,
         "body": without_frontmatter(text),
         "kind": meta.get("kind", ""),
         "status": meta.get("status", ""),
+        "can_record_publish": can_record_publish,
         # 字符串透传：mtime_ns 超出 JS 安全整数范围，数字形式会在浏览器里丢精度
         "mtime_ns": str(path.stat().st_mtime_ns),
         "obsidian_uri": obsidian_uri(path),
@@ -1473,6 +1480,161 @@ def queue_intent(rel_path: str, action: str) -> dict[str, object]:
     return {"ok": True, "queued": entry, "queue_path": relative(INTENT_QUEUE_FILE)}
 
 
+PUBLISH_PLATFORMS = ("x", "wechat", "shipinhao", "douyin", "xiaohongshu")
+PUBLISH_ARCHIVE_RULES = {
+    # 草稿 kind → (正式稿子目录, 正式稿 kind)
+    "draft": ("10-X长文", "article-published"),
+    "article-draft": ("10-X长文", "article-published"),
+    "oral-script": ("50-口播视频", "video-published"),
+}
+
+
+def wikilink_body(value: str) -> str:
+    match = re.match(r"\s*\[\[([^\]|#]+)", value or "")
+    return match.group(1).strip() if match else ""
+
+
+def find_published_by_content_id(content_id: str) -> Path | None:
+    if not content_id:
+        return None
+    root = VAULT / LAYOUT["published_dir"]
+    feedback_prefix = area_prefix("feedback_dir")
+    if not root.exists():
+        return None
+    for path in root.rglob("*.md"):
+        if relative(path).startswith(feedback_prefix):
+            continue
+        text = try_read(path)
+        if text is None:
+            continue
+        if parse_frontmatter(text).get("content_id", "") == content_id:
+            return path
+    return None
+
+
+def record_publication(
+    rel_path: str, platform: str, url: str, published_at: str
+) -> dict[str, object]:
+    """登记一次已完成的公开发布：确保正式稿存在 → 跑发布归档脚本 → 回写草稿与成稿包。"""
+    if platform not in PUBLISH_PLATFORMS:
+        raise ValueError("不支持这个平台")
+    url = url.strip()
+    published_at = published_at.strip()
+    if not url or not published_at:
+        raise ValueError("公开链接和发布时间都不能为空")
+    path = vault_note_path(rel_path)
+    rel = relative(path)
+    meta = parse_frontmatter(read_text(path))
+    published_prefix = area_prefix("published_dir")
+    created_article = False
+    if rel.startswith(published_prefix):
+        article = path
+    else:
+        rule = PUBLISH_ARCHIVE_RULES.get(meta.get("kind", ""))
+        if rule is None:
+            raise ValueError("只能对草稿或 40-发布 里的正式稿登记发布")
+        article = find_published_by_content_id(meta.get("content_id", ""))
+        if article is None:
+            subdir, published_kind = rule
+            target = VAULT / LAYOUT["published_dir"] / subdir / path.name
+            if target.exists():
+                raise ValueError(
+                    f"40-发布/{subdir} 已有同名文件但 content_id 对不上，请先人工确认再登记"
+                )
+            text = update_frontmatter_text(
+                read_text(path),
+                {
+                    "kind": published_kind,
+                    "status": "published",
+                    "draft_source": f"[[{rel[:-3]}]]",
+                },
+            )
+            atomic_write(target, text)
+            article = target
+            created_article = True
+    if not RECORD_SCRIPT.is_file():
+        raise ValueError("找不到发布归档脚本")
+    env = {**os.environ, "RAYS_BRAIN": str(VAULT)}
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RECORD_SCRIPT),
+                "--article",
+                relative(article),
+                "--platform",
+                platform,
+                "--url",
+                url,
+                "--published-at",
+                published_at,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            cwd=str(RECORD_SCRIPT.parent),
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError("登记超时，请稍后在终端重试")
+    if completed.returncode != 0:
+        lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
+        raise ValueError(f"登记失败：{(lines[-1] if lines else '未知错误')[:300]}")
+    report = [line.rstrip() for line in completed.stdout.splitlines()]
+    updated: list[str] = []
+    if article != path:
+        try:
+            atomic_write(
+                path,
+                update_frontmatter_text(
+                    read_text(path),
+                    {
+                        "status": "published",
+                        "published_file": f"[[{relative(article)[:-3]}]]",
+                    },
+                ),
+            )
+            updated.append(rel)
+        except (OSError, ValueError):
+            pass
+        pack_target = wikilink_body(meta.get("content_pack", ""))
+        pack = resolve_wikilink(pack_target) if pack_target else None
+        if pack is not None:
+            try:
+                pack_meta = parse_frontmatter(read_text(pack))
+                if pack_meta.get("status", "").strip() != "published":
+                    atomic_write(
+                        pack,
+                        update_frontmatter_text(
+                            read_text(pack),
+                            {
+                                "status": "published",
+                                "published_file": f"[[{relative(article)[:-3]}]]",
+                            },
+                        ),
+                    )
+                    updated.append(relative(pack))
+            except (OSError, ValueError):
+                pass
+    log_operation(
+        {
+            "op": "record-publish",
+            "path": rel,
+            "article": relative(article),
+            "platform": platform,
+            "url": url,
+            "created_article": created_article,
+        }
+    )
+    return {
+        "ok": True,
+        "article": relative(article),
+        "created_article": created_article,
+        "updated": updated,
+        "report": report[-30:],
+    }
+
+
 def pipeline_status() -> dict[str, object]:
     runtime = load_runtime_state()
     errors = [
@@ -1726,6 +1888,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(
                     queue_intent(
                         str(payload.get("path", "")), str(payload.get("action", ""))
+                    )
+                )
+            elif parsed.path == "/api/publish/record":
+                self.send_json(
+                    record_publication(
+                        str(payload.get("path", "")),
+                        str(payload.get("platform", "")),
+                        str(payload.get("url", "")),
+                        str(payload.get("published_at", "")),
                     )
                 )
             else:

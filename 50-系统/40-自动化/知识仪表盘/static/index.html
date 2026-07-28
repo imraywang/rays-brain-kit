@@ -252,6 +252,35 @@
     </div>
   </aside>
 
+  <div class="modal-scrim" id="publish-scrim" hidden></div>
+  <form class="angle-dialog publish-dialog" id="publish-dialog" hidden>
+    <p class="eyebrow">登记已完成的公开发布</p>
+    <h3 id="publish-title"></h3>
+    <div class="publish-fields" id="publish-fields">
+      <label>平台
+        <select id="publish-platform">
+          <option value="x">X Article</option>
+          <option value="wechat">微信公众号</option>
+          <option value="shipinhao">视频号</option>
+          <option value="douyin">抖音</option>
+          <option value="xiaohongshu">小红书</option>
+        </select>
+      </label>
+      <label>公开链接（不是草稿编辑器地址）
+        <input id="publish-url" type="url" autocomplete="off" required placeholder="https://…">
+      </label>
+      <label>平台显示的发布时间
+        <input id="publish-time" type="datetime-local" required>
+      </label>
+      <p class="publish-note">脚本只登记事实，不发布任何东西。多个平台就登记多次。</p>
+    </div>
+    <pre class="publish-report" id="publish-report" hidden></pre>
+    <div class="angle-buttons">
+      <button type="button" class="ghost-button" id="publish-cancel">取消</button>
+      <button type="submit" class="primary-button" id="publish-submit">登记发布</button>
+    </div>
+  </form>
+
   <div class="modal-scrim" id="angle-scrim" hidden></div>
   <form class="angle-dialog" id="angle-dialog" hidden>
     <p class="eyebrow">立项为写作任务</p>
