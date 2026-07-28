@@ -927,7 +927,15 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
 .rail-badge.red { color: var(--red); background: var(--red-soft); }
 .rail-badge.yellow { color: var(--yellow); background: var(--yellow-soft); }
 
-.rail-module { margin-top: 18px; min-height: 0; }
+.rail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+.rail-module { margin-top: 18px; }
 .rail-cards { display: grid; gap: 5px; }
 .rail-card {
   display: grid;
@@ -979,7 +987,7 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
   .note-drawer { width: 100%; }
   .note-scroll { padding: 18px 16px max(24px, env(safe-area-inset-bottom)); }
   .note-title { font-size: 20px; }
-  .rail-module, .rail-system, .rail-health-dot { display: none; }
+  .rail-scroll, .rail-module, .rail-system, .rail-health-dot { display: none; }
   .rail-link { position: relative; }
   .rail-badge { position: absolute; top: 3px; right: max(8px, 18%); min-width: 16px; padding: 0 5px; font-size: 9px; line-height: 15px; }
 }
