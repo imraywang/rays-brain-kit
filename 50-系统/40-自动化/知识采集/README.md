@@ -56,6 +56,7 @@ Mac 每 30 分钟检查一次。没有新资料时不会调用 Codex。
 草稿由 X Article 管线推入平台草稿箱后（frontmatter 记 `x_article_status: draft` 和 `x_article_saved_at`），发布是人在平台上手动完成的动作。每 30 分钟任务里有一步自动确认发布结果，把「已发布」登记回知识库：
 
 - 严格门控：只有 `10-创作/30-文章草稿/` 与 `10-创作/20-口播草稿/` 里 `x_article_status: draft` 且 `x_article_saved_at` 在 72 小时内的草稿才触发 API 调用；一次时间线调用（默认拉最近 50 条，`config.json` 的 `x_timeline_max_results`）覆盖本轮全部待确认草稿；超窗口不再轮询，留给工作台「登记发布」表单人工兜底。
+- 门控字段的上游：这两个字段由 [rayskills](https://github.com/imraywang/rayskills) 的 `ray-x-article` skill 在把草稿推入 X 草稿箱时写入（`scripts/record_draft.py`，带时区 ISO 时间）。`draft-needs-cover` 等中间状态不触发检测；补齐封面重新记录为 `draft` 会刷新 `x_article_saved_at`，等于重开 72 小时窗口。不用该 skill 的话，手工在草稿 frontmatter 写这两个字段同样能接入检测。
 - 调用前先本地对账：对应正式稿已经登记过 X 发布（比如走了工作台表单）时，直接把草稿这头的状态关上，不调 API。
 - 匹配规则：帖子时间晚于 `x_article_saved_at`，且 Article 标题精确相等；发布前在编辑器里微调过标题的情况走高相似度兜底（阈值 0.75）。无论哪一档都要求唯一命中，多条命中、同一条帖子被两篇草稿匹配等不确定情况只记日志不动文件。
 - 命中后：缺正式稿时先归档正式稿到 `40-发布/`（口径同知识仪表盘的登记发布），再调用 `../发布归档/record_published.py --platform x` 完成正式稿、反馈卡与源头书签归档（它会拒绝草稿编辑器地址），最后把草稿与成稿包的 `status` 置为 `published` 并写 `published_file` 链接。
