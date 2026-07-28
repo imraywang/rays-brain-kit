@@ -30,6 +30,16 @@ TASK_KINDS = {"writing-task", "content-task", "content-pack"}
 INACTIVE_STATUSES = {"published", "cancelled", "completed", "archived", "closed"}
 CONTEXT_CHAR_LIMIT = 24_000
 CODEX_TIMEOUT = 1_200
+# 写作规范直接读 ray-writer skill（安装位是指向仓库的符号链接，永远最新），
+# 无头引擎与 /ray 深链共享同一套语气、原型和质量门，只是执行者不同。
+WRITER_SKILL_DIR = Path(
+    os.environ.get("RAY_WRITER_SKILL_DIR", str(Path.home() / ".claude/skills/ray-writer"))
+).expanduser()
+WRITER_SPEC_FILES = (
+    ("voice.md（语气）", "references/voice.md"),
+    ("article-prototypes.md（文章原型，只选一个主原型）", "references/article-prototypes.md"),
+    ("quality-gates.md（四层检查，作为你交稿前的自检标准）", "references/quality-gates.md"),
+)
 
 
 def log(message: str) -> None:
@@ -162,12 +172,39 @@ def gather_context(task_path: Path) -> tuple[dict[str, str], str]:
     return meta, "\n\n---\n\n".join(blocks)
 
 
+def writer_specs() -> str:
+    """从 ray-writer skill 取真实写作规范：固定原则 + 语气 + 原型 + 质量门。
+
+    skill 未安装时返回空串，提示词退回自身的底线纪律——功能降级但不失败。
+    """
+    blocks: list[str] = []
+    skill_md = WRITER_SKILL_DIR / "SKILL.md"
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+        match = re.search(r"^## 固定原则\n(.*?)(?=^## )", text, flags=re.M | re.S)
+        if match:
+            blocks.append("### 固定原则（ray-writer）\n\n" + match.group(1).strip())
+    except OSError:
+        pass
+    for label, relative_path in WRITER_SPEC_FILES:
+        try:
+            content = (WRITER_SKILL_DIR / relative_path).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        blocks.append(f"### {label}\n\n{clip(content, 9_000)}")
+    return "\n\n".join(blocks)
+
+
 def build_prompt(task_path: Path, meta: dict[str, str], materials: str) -> str:
     template = PROMPT_FILE.read_text(encoding="utf-8")
+    specs = writer_specs()
+    if not specs:
+        specs = "（ray-writer 规范文件不可用，仅按上方硬性纪律执行）"
     return (
         template.replace("{{task_rel}}", rel(task_path))
         .replace("{{selected_angle}}", meta.get("selected_angle", "见成稿包"))
         .replace("{{platform}}", meta.get("platform", "X Article + 微信公众号"))
+        .replace("{{writer_specs}}", specs)
         .replace("{{materials}}", materials)
     )
 

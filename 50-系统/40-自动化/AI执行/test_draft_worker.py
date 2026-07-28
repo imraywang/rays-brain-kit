@@ -52,6 +52,22 @@ class DraftWorkerTests(unittest.TestCase):
         self.assertIn("成稿包（本次写作的唯一任务书）", materials)
         self.assertIn("候选材料内容", materials)
 
+    def test_prompt_injects_ray_writer_specs_when_available(self) -> None:
+        skill = self.vault / "fake-skill"
+        (skill / "references").mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "# t\n\n## 固定原则\n\n1. 只用真实材料。\n\n## 其他\n", encoding="utf-8"
+        )
+        (skill / "references/voice.md").write_text("语气规范正文", encoding="utf-8")
+        with mock.patch.object(worker, "WRITER_SKILL_DIR", skill):
+            meta, materials = worker.gather_context(self.task)
+            prompt = worker.build_prompt(self.task, meta, materials)
+        self.assertIn("只用真实材料", prompt)
+        self.assertIn("语气规范正文", prompt)
+        with mock.patch.object(worker, "WRITER_SKILL_DIR", self.vault / "不存在"):
+            prompt = worker.build_prompt(self.task, meta, materials)
+        self.assertIn("规范文件不可用", prompt)
+
     def test_write_draft_and_task_backfill_and_queue_tick(self) -> None:
         queue = self.vault / "50-系统/40-自动化/AI任务队列.md"
         queue.parent.mkdir(parents=True, exist_ok=True)
