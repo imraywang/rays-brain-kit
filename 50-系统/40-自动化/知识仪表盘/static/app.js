@@ -1156,6 +1156,14 @@ function isoWithOffset(datetimeLocal) {
   return `${datetimeLocal}:00${sign}${pad(Math.trunc(offset / 60))}:${pad(offset % 60)}`;
 }
 
+const PLATFORM_URL_FIELDS = {
+  x: "x_article_url",
+  wechat: "wechat_public_url",
+  shipinhao: "shipinhao_url",
+  douyin: "douyin_url",
+  xiaohongshu: "xiaohongshu_url",
+};
+
 function openPublishDialog(note) {
   state.publishTarget = note.path;
   $("#publish-title").textContent = note.title;
@@ -1164,12 +1172,33 @@ function openPublishDialog(note) {
   $("#publish-report").textContent = "";
   $("#publish-submit").hidden = false;
   $("#publish-submit").disabled = false;
+  $("#publish-again").hidden = true;
   $("#publish-cancel").textContent = "取消";
   $("#publish-url").value = "";
   $("#publish-time").value = localDatetimeValue();
+  // 标出已登记的平台，默认选中第一个还没登记的
+  const meta = note.frontmatter || {};
+  let firstOpen = "";
+  $$("#publish-platform option").forEach((option) => {
+    const recorded = Boolean((meta[PLATFORM_URL_FIELDS[option.value]] || "").trim());
+    option.textContent = option.textContent.replace(" ✓ 已登记", "") + (recorded ? " ✓ 已登记" : "");
+    if (!recorded && !firstOpen) firstOpen = option.value;
+  });
+  if (firstOpen) $("#publish-platform").value = firstOpen;
   $("#publish-scrim").hidden = false;
   $("#publish-dialog").hidden = false;
   setTimeout(() => $("#publish-url").focus(), 60);
+}
+
+async function reopenPublishDialog() {
+  const path = state.publishTarget;
+  if (!path) return;
+  try {
+    const note = await api(`/api/note?path=${encodeURIComponent(path)}`);
+    openPublishDialog(note);
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 function closePublishDialog() {
@@ -1201,6 +1230,9 @@ async function submitPublishDialog() {
     $("#publish-report").textContent = lines.join("\n").trim() || "登记完成";
     $("#publish-report").hidden = false;
     button.hidden = true;
+    // 后续平台直接登记在正式稿上：平台字段与「已登记」标记都以它为准
+    state.publishTarget = result.article;
+    $("#publish-again").hidden = false;
     $("#publish-cancel").textContent = "关闭";
     showToast("发布已登记，状态已回流");
     await loadDashboard({ quiet: true });
@@ -1538,6 +1570,7 @@ function bindEvents() {
   });
   $("#publish-cancel").addEventListener("click", closePublishDialog);
   $("#publish-scrim").addEventListener("click", closePublishDialog);
+  $("#publish-again").addEventListener("click", reopenPublishDialog);
   $("#publish-dialog").addEventListener("submit", (event) => {
     event.preventDefault();
     submitPublishDialog();
