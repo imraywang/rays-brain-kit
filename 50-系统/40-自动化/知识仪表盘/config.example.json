@@ -1,10 +1,15 @@
 {
   "review_dir": "10-创作/10-灵感/10-待评估/剪藏复核",
+  "topics_dir": "10-创作/10-灵感/20-候选选题",
+  "topic_reserve_dir": "10-创作/10-灵感/90-选题储备",
   "inbox_file": "10-创作/10-灵感/inbox.md",
   "create_dir": "10-创作",
-  "drafts_dir": "10-创作/20-草稿",
+  "writing_tasks_dir": "10-创作/20-写作任务",
+  "drafts_dir": "10-创作/30-文章草稿",
+  "oral_scripts_dir": "10-创作/20-口播草稿",
   "knowledge_dir": "20-知识",
   "sources_dir": "30-资料",
   "published_dir": "40-发布",
+  "feedback_dir": "40-发布/00-内容反馈",
   "archive_dir": "90-归档"
 }

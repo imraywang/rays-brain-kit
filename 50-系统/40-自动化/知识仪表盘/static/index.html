@@ -145,7 +145,7 @@
               <p class="eyebrow">Progress</p>
               <h2 id="board-title">📋 进展看板</h2>
             </div>
-            <p>拖动前两列的卡片即可勾选或撤回；后三列展示真实进度，点卡片回到 Obsidian</p>
+            <p>拖前两列勾选或撤回，候选拖到「写作任务」直接立项；点卡片在工作台内阅读，状态流转都在阅读面板里完成</p>
           </div>
           <div class="board" id="board-columns"></div>
         </section>
@@ -199,6 +199,35 @@
       <button class="primary-button" type="submit">记入收件箱</button>
     </form>
   </aside>
+
+  <div class="drawer-scrim" id="note-scrim" hidden></div>
+  <aside class="note-drawer" id="note-drawer" aria-labelledby="note-title" aria-hidden="true" inert>
+    <div class="note-bar">
+      <button class="note-nav" id="note-back" type="button" aria-label="返回上一篇" hidden>←</button>
+      <span class="note-path" id="note-path"></span>
+      <a class="note-nav" id="note-obsidian" href="#" aria-label="在 Obsidian 打开" title="在 Obsidian 打开">↗</a>
+      <button class="note-nav" id="note-close" type="button" aria-label="关闭阅读面板">×</button>
+    </div>
+    <div class="note-scroll" id="note-scroll">
+      <p class="eyebrow" id="note-kicker"></p>
+      <h2 class="note-title" id="note-title"></h2>
+      <div class="note-chips" id="note-chips"></div>
+      <div class="note-actions" id="note-actions"></div>
+      <article class="md" id="note-body"></article>
+    </div>
+  </aside>
+
+  <div class="modal-scrim" id="angle-scrim" hidden></div>
+  <form class="angle-dialog" id="angle-dialog" hidden>
+    <p class="eyebrow">立项为写作任务</p>
+    <h3 id="angle-topic-title"></h3>
+    <label for="angle-input">本次角度（一句话说清这篇要写什么）</label>
+    <input id="angle-input" maxlength="120" autocomplete="off" required placeholder="例如：从 FDE 视角拆解企业知识库落地的三个失败模式">
+    <div class="angle-buttons">
+      <button type="button" class="ghost-button" id="angle-cancel">取消</button>
+      <button type="submit" class="primary-button">建立写作任务</button>
+    </div>
+  </form>
 
   <div class="action-menu" id="action-menu" role="menu" aria-label="选择处理方式" hidden></div>
   <div class="drawer-scrim" id="drawer-scrim" hidden></div>

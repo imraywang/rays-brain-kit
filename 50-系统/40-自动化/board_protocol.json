@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "kinds": ["topic-candidate"],
+      "dirs": ["topics_dir", "topic_reserve_dir"],
+      "status_labels": {
+        "candidate": "候选中",
+        "parked": "暂缓",
+        "closed": "已关闭",
+        "partially-published": "已发部分角度",
+        "active": "已立项",
+        "published": "已发布"
+      },
+      "set_on_change": { "updated_at": "$datetime" },
+      "transitions": [
+        { "from": "candidate", "to": "parked", "label": "暂缓这个选题" },
+        { "from": "parked", "to": "candidate", "label": "恢复为候选" },
+        { "from": "candidate", "to": "closed", "label": "关闭选题", "confirm": "关闭后不再出现在候选池；如有新事实需要重新开启。确定关闭？" },
+        { "from": "parked", "to": "closed", "label": "关闭选题", "confirm": "关闭后不再出现在候选池；如有新事实需要重新开启。确定关闭？" },
+        { "from": "closed", "to": "candidate", "label": "重新开启为候选" },
+        { "from": "partially-published", "to": "closed", "label": "不再续写，关闭", "confirm": "剩余角度将不再出现在可续写列表。确定关闭？" }
+      ]
+    },
+    {
+      "kinds": ["writing-task", "content-task", "content-pack"],
+      "dirs": ["writing_tasks_dir"],
+      "status_labels": {
+        "active": "已立项",
+        "researching": "调研中",
+        "drafting": "起草中",
+        "drafted": "初稿完成",
+        "draft-complete": "成稿待验",
+        "validated": "已验证",
+        "cancelled": "已放弃"
+      },
+      "sequence": ["active", "researching", "drafting", "drafted", "draft-complete", "validated"],
+      "set_on_change": { "updated_at": "$datetime" },
+      "transitions": [
+        { "from": "*", "to": "cancelled", "label": "放弃这项任务", "confirm": "放弃后将从看板消失（状态改为 cancelled，随时可在工作台重新激活）。确定放弃？" },
+        { "from": "cancelled", "to": "active", "label": "重新激活" }
+      ]
+    },
+    {
+      "kinds": ["content-feedback", "publication-feedback", "feedback"],
+      "dirs": ["feedback_dir"],
+      "status_labels": {
+        "pending": "待复盘",
+        "reviewed": "已复盘"
+      },
+      "transitions": [
+        { "from": "pending", "to": "reviewed", "label": "标记已复盘", "confirm": "确认已完成知识回写与剩余角度记录？", "set": { "reviewed_at": "$date" } },
+        { "from": "reviewed", "to": "pending", "label": "撤销复盘标记", "set": { "reviewed_at": "" } }
+      ]
+    }
+  ]
+}

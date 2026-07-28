@@ -7,21 +7,43 @@ const state = {
   eventTimer: null,
   undo: null,
   dragging: null,
+  note: { open: false, follow: false, stack: [], current: null },
+  angleTarget: null,
 };
 
-const KEY_ACTIONS = { "1": "knowledge", "2": "writing", "3": "later", "4": "cleanup" };
+const EXPECTED_SCHEMA_VERSION = 3;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
-const ACTION_NAMES = { knowledge: "沉淀为知识", writing: "进入写作", later: "稍后再看", cleanup: "移入待清理" };
+function reviewActions() {
+  return state.data?.review_actions || [];
+}
+
+function actionName(key) {
+  const canonical = key === "writing" ? "topic" : key;
+  return reviewActions().find((item) => item.key === canonical)?.ui_label || "已勾选";
+}
+
+function actionClass(key) {
+  return {
+    knowledge: "primary",
+    topic: "topic",
+    both: "both",
+    paused: "quiet",
+    cleanup: "cleanup",
+  }[key] || "";
+}
 
 const BOARD_COLUMNS = [
   { key: "pending", name: "待判断", dot: "red" },
-  { key: "queued", name: "等待自动处理", dot: "yellow" },
-  { key: "writable", name: "可写作", dot: "blue" },
-  { key: "drafts", name: "写作中", dot: "purple" },
+  { key: "queued", name: "等待处理", dot: "yellow" },
+  { key: "topics", name: "候选选题", dot: "blue" },
+  { key: "continuations", name: "可续写", dot: "blue" },
+  { key: "tasks", name: "写作任务", dot: "purple" },
+  { key: "drafts", name: "草稿", dot: "purple" },
   { key: "published", name: "已发布", dot: "green" },
+  { key: "feedback", name: "待复盘", dot: "yellow" },
 ];
 
 function escapeHtml(value = "") {
@@ -59,6 +81,20 @@ function formatRecent(value) {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
 }
 
+function valueProps(item) {
+  const props = [];
+  if (String(item.knowledge_value ?? "").trim()) {
+    props.push(`<span class="kprop value knowledge-value">知识 ${escapeHtml(item.knowledge_value)}</span>`);
+  }
+  if (String(item.writing_value ?? "").trim()) {
+    props.push(`<span class="kprop value writing-value">写作 ${escapeHtml(item.writing_value)}</span>`);
+  }
+  if (String(item.timeliness ?? "").trim()) {
+    props.push(`<span class="kprop value timeliness">时效 ${escapeHtml(item.timeliness)}</span>`);
+  }
+  return props;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -78,7 +114,11 @@ async function loadDashboard({ quiet = false } = {}) {
   const refresh = $("#refresh");
   refresh.classList.add("spinning");
   try {
-    state.data = await api("/api/dashboard");
+    const payload = await api("/api/dashboard");
+    if (payload.schema_version !== EXPECTED_SCHEMA_VERSION) {
+      throw new Error("后台还是旧版本，请重新启动知识仪表盘");
+    }
+    state.data = payload;
     state.reviewIndex = Math.max(0, state.reviewIndex);
     renderDashboard();
     $("#loading-state").hidden = true;
@@ -122,13 +162,15 @@ function renderDashboard() {
 function renderPipeline(counts) {
   const steps = [
     ["资料池", counts.captured, "所有外部输入"],
-    ["待提炼", counts.pipeline_pending, "机器队列"],
     ["待判断", counts.decision_pending, "今天的阻力"],
-    ["可写作", counts.writable, "已经确认"],
-    ["长期知识", counts.knowledge, "可复用资产"],
+    ["候选选题", counts.topic_candidates, "通过审核"],
+    ["可续写", counts.topic_continuations, "已有剩余角度"],
+    ["写作任务", counts.writing_tasks, "已经立项"],
+    ["草稿", counts.drafts, "正在写"],
+    ["已发布", counts.published, "内容成品"],
   ];
   $("#pipeline").innerHTML = steps.map(([label, value, note], index) => `
-    <div class="pipeline-step ${index === 2 && value > 0 ? "attention" : ""}">
+    <div class="pipeline-step ${index === 1 && value > 0 ? "attention" : ""}">
       <span>${escapeHtml(label)}</span>
       <strong>${value}</strong>
       <small>${escapeHtml(note)}</small>
@@ -138,8 +180,8 @@ function renderPipeline(counts) {
   const ledger = [
     ["高价值待判断", counts.high_value],
     ["低成本可清理", counts.low_value],
-    ["正在写的草稿", counts.drafts],
-    ["正式发布", counts.published],
+    ["长期知识", counts.knowledge],
+    ["待反馈", counts.feedback_pending],
   ];
   $("#metric-ledger").innerHTML = ledger.map(([label, value]) => `
     <div class="ledger-item"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>
@@ -178,20 +220,22 @@ function renderReview() {
       <span class="tag">${escapeHtml(item.recommendation)}</span>
       ${item.kind ? `<span class="tag">${escapeHtml(item.kind)}</span>` : ""}
       ${item.confidence ? `<span class="tag">置信度 ${escapeHtml(item.confidence)}</span>` : ""}
+      ${valueProps(item).join("")}
     </div>
-    <h3>${escapeHtml(item.title)}</h3>
-    <p class="summary">${escapeHtml(item.summary || "这张卡还没有摘要，建议回到原笔记查看。")}</p>
+    <h3><a href="#" data-note-path="${escapeHtml(item.path)}" data-note-follow="1">${escapeHtml(item.title)}</a></h3>
+    <p class="summary">${escapeHtml(item.summary || "这张卡还没有摘要，点标题阅读全文再判断。")}</p>
     <div class="review-links">
-      <a class="text-link" href="${escapeHtml(item.obsidian_uri)}">在 Obsidian 查看 ↗</a>
+      <a class="text-link" href="#" data-note-path="${escapeHtml(item.path)}" data-note-follow="1">阅读全文 →</a>
+      <a class="text-link" href="${escapeHtml(item.obsidian_uri)}">在 Obsidian 打开 ↗</a>
       ${source ? `<a class="text-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>` : ""}
     </div>
     <div class="review-actions" aria-label="选择处理方式">
-      <button class="decision-button primary" type="button" data-review-action="knowledge">沉淀为知识</button>
-      <button class="decision-button writing" type="button" data-review-action="writing">进入写作</button>
-      <button class="decision-button quiet" type="button" data-review-action="later">稍后再看</button>
-      <button class="decision-button cleanup" type="button" data-review-action="cleanup">移入待清理</button>
+      ${reviewActions().map((action) => `
+        <button class="decision-button ${actionClass(action.key)}" type="button"
+          data-review-action="${escapeHtml(action.key)}">${escapeHtml(action.ui_label)}</button>
+      `).join("")}
     </div>
-    <p class="key-hints">J / K 切换卡片 · 1–4 选择处理 · U 撤回 · O 打开原文</p>`;
+    <p class="key-hints">J / K 切换卡片 · 1–5 选择处理 · U 撤回 · O 阅读全文 · ⇧O 打开 Obsidian</p>`;
 
   $$("[data-review-action]").forEach((button) => button.addEventListener("click", () => chooseAction(item, button.dataset.reviewAction)));
 
@@ -228,6 +272,7 @@ async function chooseAction(item, action) {
     renderReview();
     renderQueued();
     renderBoard();
+    syncNoteDrawerWithReview();
     showToast(`已选择「${result.label}」，等待自动处理`, true);
   } catch (error) {
     showToast(error.message);
@@ -237,10 +282,21 @@ async function chooseAction(item, action) {
 
 async function undoAction() {
   if (!state.undo) return;
+  const undo = state.undo;
   try {
+    if (undo.type === "transition") {
+      await transitionNote(undo.path, undo.to);
+      state.undo = null;
+      await loadDashboard({ quiet: true });
+      if (state.note.open && state.note.current?.path === undo.path) {
+        await openNote({ path: undo.path }, { push: false });
+      }
+      showToast("状态已撤回");
+      return;
+    }
     await api("/api/reviews/action", {
       method: "POST",
-      body: JSON.stringify({ path: state.undo.path, action: null }),
+      body: JSON.stringify({ path: undo.path, action: null }),
     });
     state.undo = null;
     await loadDashboard({ quiet: true });
@@ -261,8 +317,8 @@ function renderQueued() {
   $("#queued-summary").textContent = `${cards.length} 条会在下一轮自动流程中执行，此前随时可撤回`;
   $("#queued-list").innerHTML = cards.map((item) => `
     <div class="queued-item">
-      <span class="queued-tag ${escapeHtml(item.selected_action || "")}">${escapeHtml(ACTION_NAMES[item.selected_action] || "已勾选")}</span>
-      <a href="${escapeHtml(item.obsidian_uri)}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</a>
+      <span class="queued-tag ${escapeHtml(item.selected_action || "")}">${escapeHtml(actionName(item.selected_action))}</span>
+      <a href="#" data-note-path="${escapeHtml(item.path)}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</a>
       <button class="queued-undo" type="button" data-queued-path="${escapeHtml(item.path)}">撤回</button>
     </div>
   `).join("");
@@ -291,18 +347,33 @@ function boardCard(item, column) {
     props.push(`<span class="kprop score">${Number(item.score) || 0}</span>`);
     if (item.kind) props.push(`<span class="kprop">${escapeHtml(item.kind)}</span>`);
   }
+  if ((column === "topics" || column === "continuations" || column === "tasks") && Number(item.priority_score)) {
+    props.push(`<span class="kprop score">优先 ${Number(item.priority_score)}</span>`);
+  }
+  props.push(...valueProps(item));
   if (column === "queued") {
-    props.push(`<span class="kprop action ${escapeHtml(item.selected_action || "")}">${escapeHtml(ACTION_NAMES[item.selected_action] || "已勾选")}</span>`);
+    props.push(`<span class="kprop action ${escapeHtml(item.selected_action || "")}">${escapeHtml(actionName(item.selected_action))}</span>`);
   }
   if (column === "published" && item.platform) props.push(`<span class="kprop">${escapeHtml(item.platform)}</span>`);
+  if (column === "feedback" && item.due_at) props.push(`<span class="kprop timeliness">截止 ${escapeHtml(String(item.due_at))}</span>`);
   if (item.modified) props.push(`<span class="kprop time">${escapeHtml(formatRecent(item.modified))}</span>`);
-  const draggable = column === "pending" || column === "queued";
+  const statusLabel = statusLabelOf(item.kind, item.status);
+  if (statusLabel && ["topics", "continuations", "tasks"].includes(column)) {
+    props.unshift(`<span class="kprop status">${escapeHtml(statusLabel)}</span>`);
+  }
+  const draggable = ["pending", "queued", "topics", "continuations"].includes(column);
   return `
     <div class="kcard${draggable ? " draggable" : ""}" ${draggable ? 'draggable="true"' : ""} data-card-path="${escapeHtml(item.path)}" data-card-column="${column}">
-      <a class="kcard-title" href="${escapeHtml(item.obsidian_uri)}">${escapeHtml(item.title)}</a>
+      <a class="kcard-title" href="#" data-note-path="${escapeHtml(item.path)}">${escapeHtml(item.title)}</a>
       ${props.length ? `<span class="kcard-props">${props.join("")}</span>` : ""}
       ${column === "queued" ? `<button class="kcard-undo" type="button" data-kanban-undo="${escapeHtml(item.path)}" aria-label="撤回这张卡">撤回</button>` : ""}
+      ${column === "feedback" ? `<button class="kcard-quick" type="button" data-feedback-done="${escapeHtml(item.path)}">✓ 已复盘</button>` : ""}
     </div>`;
+}
+
+function statusLabelOf(kind, status) {
+  const proto = state.data?.board_protocol?.[kind];
+  return proto?.status_labels?.[status] || "";
 }
 
 function renderBoard() {
@@ -310,9 +381,12 @@ function renderBoard() {
   const columnData = {
     pending: d.reviews || [],
     queued: d.queued_reviews || [],
-    writable: d.writable || [],
+    topics: d.topic_candidates || [],
+    continuations: d.topic_continuations || [],
+    tasks: d.writing_tasks || [],
     drafts: d.drafts || [],
     published: d.published || [],
+    feedback: (d.feedback || []).filter((item) => item.pending),
   };
   const LIMIT = 20;
   $("#board-columns").innerHTML = BOARD_COLUMNS.map((col) => {
@@ -337,7 +411,10 @@ function renderBoard() {
 function canDropTo(key) {
   const from = state.dragging;
   if (!from) return false;
-  return (key === "queued" && from.column === "pending") || (key === "pending" && from.column === "queued");
+  if (key === "queued" && from.column === "pending") return true;
+  if (key === "pending" && from.column === "queued") return true;
+  if (key === "tasks" && ["topics", "continuations"].includes(from.column)) return true;
+  return false;
 }
 
 function bindBoardEvents() {
@@ -370,16 +447,26 @@ function bindBoardEvents() {
       event.preventDefault();
       if (key === "queued" && from.column === "pending") showActionMenu(event.clientX, event.clientY, from.path);
       else if (key === "pending" && from.column === "queued") withdrawQueued(from.path);
+      else if (key === "tasks") openAngleDialog(from.path);
     });
   });
   $$("[data-kanban-undo]").forEach((button) => button.addEventListener("click", () => withdrawQueued(button.dataset.kanbanUndo, button)));
+  $$("[data-feedback-done]").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await markFeedbackReviewed(button.dataset.feedbackDone);
+    } catch (error) {
+      showToast(error.message);
+      button.disabled = false;
+    }
+  }));
 }
 
 function showActionMenu(x, y, path) {
   const menu = $("#action-menu");
   menu.innerHTML = `
     <p>这张卡怎么处理？</p>
-    ${Object.entries(ACTION_NAMES).map(([key, name]) => `<button type="button" data-menu-action="${key}">${name}</button>`).join("")}
+    ${reviewActions().map((action) => `<button type="button" data-menu-action="${escapeHtml(action.key)}">${escapeHtml(action.ui_label)}</button>`).join("")}
     <button type="button" class="cancel" data-menu-cancel>取消</button>`;
   menu.hidden = false;
   const rect = menu.getBoundingClientRect();
@@ -456,12 +543,383 @@ function renderKnowledgeMix() {
 
 function renderRecent() {
   $("#recent-list").innerHTML = (state.data.recent || []).map((item) => `
-    <a class="recent-item" href="${escapeHtml(item.obsidian_uri)}">
+    <a class="recent-item" href="#" data-note-path="${escapeHtml(item.path)}">
       <small>${escapeHtml(item.area)}${item.kind ? ` · ${escapeHtml(item.kind)}` : ""}</small>
       <strong>${escapeHtml(item.title)}</strong>
       <time datetime="${escapeHtml(item.modified)}">${escapeHtml(formatRecent(item.modified))}</time>
     </a>
   `).join("");
+}
+
+/* ---- Markdown 渲染：零依赖，覆盖 vault 常用子集；不透传原始 HTML ---- */
+
+function splitOnce(value, separator) {
+  const index = value.indexOf(separator);
+  return index < 0 ? [value, ""] : [value.slice(0, index), value.slice(index + 1)];
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i;
+
+function mdInline(text) {
+  let out = escapeHtml(text);
+  const codes = [];
+  out = out.replace(/`([^`]+)`/g, (m, code) => {
+    codes.push(code);
+    return `${codes.length - 1}`;
+  });
+  out = out.replace(/!\[\[([^\]]+)\]\]/g, (m, inner) => {
+    const [targetRaw, alias] = splitOnce(inner, "|");
+    const target = targetRaw.trim();
+    if (IMAGE_EXT.test(target)) {
+      return `<img class="md-img" loading="lazy" src="/api/asset?link=${encodeURIComponent(target)}" alt="${alias.trim() || target}">`;
+    }
+    return `<a href="#" class="wikilink embed" data-wikilink="${target}">📄 ${alias.trim() || target}</a>`;
+  });
+  out = out.replace(/\[\[([^\]]+)\]\]/g, (m, inner) => {
+    const [targetRaw, alias] = splitOnce(inner, "|");
+    const target = targetRaw.trim();
+    return `<a href="#" class="wikilink" data-wikilink="${target}">${alias.trim() || target}</a>`;
+  });
+  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, (m, alt, url) => {
+    if (/^https?:\/\//i.test(url)) {
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer">🖼 ${alt || "外部图片"}</a>`;
+    }
+    const name = url.split("/").pop();
+    return `<img class="md-img" loading="lazy" src="/api/asset?link=${encodeURIComponent(decodeURIComponent(name))}" alt="${alt}">`;
+  });
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, (m, label, url) =>
+    /^(https?:|obsidian:)/i.test(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : label);
+  out = out.replace(/(^|[^"'=\]>])(https?:\/\/[^\s<>&]+[^\s<>&.,;:!?)])/g,
+    '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  out = out.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  out = out.replace(/==([^=]+)==/g, "<mark>$1</mark>");
+  out = out.replace(/(\d+)/g, (m, index) => `<code>${codes[Number(index)]}</code>`);
+  return out;
+}
+
+function renderMarkdown(source, { skipTitle = "" } = {}) {
+  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  const html = [];
+  let sawContent = false;
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      const buffer = [];
+      i += 1;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) {
+        buffer.push(lines[i]);
+        i += 1;
+      }
+      i += 1;
+      html.push(`<pre><code>${escapeHtml(buffer.join("\n"))}</code></pre>`);
+      sawContent = true;
+      continue;
+    }
+    if (!line.trim()) { i += 1; continue; }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      i += 1;
+      if (!sawContent && heading[1].length === 1 && skipTitle && heading[2].trim() === skipTitle) {
+        sawContent = true;
+        continue;
+      }
+      sawContent = true;
+      const level = Math.min(heading[1].length + 1, 6);
+      html.push(`<h${level}>${mdInline(heading[2])}</h${level}>`);
+      continue;
+    }
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { html.push("<hr>"); i += 1; sawContent = true; continue; }
+    if (/^>/.test(line)) {
+      const buffer = [];
+      while (i < lines.length && /^>/.test(lines[i])) {
+        buffer.push(lines[i].replace(/^>\s?/, ""));
+        i += 1;
+      }
+      html.push(`<blockquote>${buffer.map(mdInline).join("<br>")}</blockquote>`);
+      sawContent = true;
+      continue;
+    }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length) {
+        const item = lines[i].match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+        if (!item) break;
+        const depth = Math.min(3, Math.floor(item[1].replace(/\t/g, "  ").length / 2));
+        const task = item[3].match(/^\[([ xX])\]\s*(.*)$/);
+        const body = task
+          ? `<input type="checkbox" disabled${task[1] === " " ? "" : " checked"}> ${mdInline(task[2])}`
+          : mdInline(item[3]);
+        items.push(`<li class="md-indent-${depth}${task ? " md-task" : ""}">${body}</li>`);
+        i += 1;
+      }
+      html.push(`<ul class="md-list">${items.join("")}</ul>`);
+      sawContent = true;
+      continue;
+    }
+    if (/^\|/.test(line)) {
+      const rows = [];
+      while (i < lines.length && /^\|/.test(lines[i])) {
+        rows.push(lines[i]);
+        i += 1;
+      }
+      const cellsOf = (row) => row.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+      const bodyRows = rows.filter((row) => !/^[\s:|-]+$/.test(row));
+      const table = bodyRows.map((row, index) => {
+        const tag = index === 0 ? "th" : "td";
+        return `<tr>${cellsOf(row).map((cell) => `<${tag}>${mdInline(cell)}</${tag}>`).join("")}</tr>`;
+      }).join("");
+      html.push(`<div class="md-table"><table>${table}</table></div>`);
+      sawContent = true;
+      continue;
+    }
+    const buffer = [];
+    while (
+      i < lines.length && lines[i].trim()
+      && !/^\s*```|^(#{1,6})\s|^>|^\s*([-*+]|\d+\.)\s+|^\||^(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i])
+    ) {
+      buffer.push(lines[i]);
+      i += 1;
+    }
+    html.push(`<p>${buffer.map(mdInline).join("<br>")}</p>`);
+    sawContent = true;
+  }
+  return html.join("");
+}
+
+/* ---- 阅读抽屉 ---- */
+
+function noteDrawerOpenState() {
+  return $("#note-drawer").classList.contains("open");
+}
+
+async function transitionNote(path, to, expectedMtime = null) {
+  if (expectedMtime === null) {
+    const fresh = await api(`/api/note?path=${encodeURIComponent(path)}`);
+    expectedMtime = fresh.mtime_ns;
+  }
+  return api("/api/note/transition", {
+    method: "POST",
+    body: JSON.stringify({ path, to, expected_mtime_ns: expectedMtime }),
+  });
+}
+
+function reverseTransitionOf(kind, from, to) {
+  const proto = state.data?.board_protocol?.[kind];
+  return proto?.transitions?.find((t) => t.from === to && t.to === from) || null;
+}
+
+async function runTransition(note, transition) {
+  if (transition.confirm && !window.confirm(transition.confirm)) return;
+  try {
+    const result = await transitionNote(note.path, transition.to, note.mtime_ns);
+    if (reverseTransitionOf(note.kind, transition.from, transition.to)) {
+      state.undo = { type: "transition", path: note.path, to: transition.from };
+      showToast(`已${result.label}（现在是「${result.to_label}」）`, true);
+    } else {
+      showToast(`已${result.label}`);
+    }
+    await loadDashboard({ quiet: true });
+    if (noteDrawerOpenState() && state.note.current?.path === note.path) {
+      await openNote({ path: note.path }, { push: false });
+    }
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function markFeedbackReviewed(path) {
+  const note = await api(`/api/note?path=${encodeURIComponent(path)}`);
+  const proto = state.data?.board_protocol?.[note.kind];
+  const transition = proto?.transitions?.find((t) => t.from === note.status && t.to === "reviewed");
+  if (!transition) throw new Error("这张卡当前不支持标记复盘");
+  await runTransition(note, transition);
+}
+
+function noteContextActions(note) {
+  const buttons = [];
+  const status = (note.frontmatter?.status || "").trim();
+  const pendingCard = (state.data?.reviews || []).find((card) => card.path === note.path);
+  const queuedCard = (state.data?.queued_reviews || []).find((card) => card.path === note.path);
+  if (pendingCard) {
+    buttons.push(...reviewActions().map((action) => `
+      <button class="decision-button ${actionClass(action.key)}" type="button"
+        data-drawer-review="${escapeHtml(action.key)}">${escapeHtml(action.ui_label)}</button>`));
+  } else if (queuedCard) {
+    buttons.push(`<button class="decision-button" type="button" data-drawer-withdraw="1">撤回「${escapeHtml(actionName(queuedCard.selected_action))}」</button>`);
+  }
+  if (note.kind === "topic-candidate" && ["candidate", "parked"].includes(status)) {
+    buttons.push(`<button class="decision-button primary" type="button" data-drawer-promote="1">立项为写作任务…</button>`);
+  }
+  const proto = state.data?.board_protocol?.[note.kind];
+  if (proto) {
+    proto.transitions.filter((t) => t.from === status).forEach((t, index) => {
+      buttons.push(`<button class="decision-button${t.to === "cancelled" || t.to === "closed" ? " cleanup" : ""}" type="button" data-drawer-transition="${index}">${escapeHtml(t.label)}</button>`);
+    });
+  }
+  return buttons.join("");
+}
+
+function bindNoteActions(note) {
+  const status = (note.frontmatter?.status || "").trim();
+  const proto = state.data?.board_protocol?.[note.kind];
+  const available = proto ? proto.transitions.filter((t) => t.from === status) : [];
+  $$("#note-actions [data-drawer-transition]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const transition = available[Number(button.dataset.drawerTransition)];
+      if (transition) runTransition(note, transition);
+    });
+  });
+  $$("#note-actions [data-drawer-review]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const card = (state.data?.reviews || []).find((item) => item.path === note.path);
+      if (!card) return;
+      const cards = filteredReviews();
+      const index = cards.findIndex((item) => item.path === note.path);
+      if (index >= 0) state.reviewIndex = index;
+      chooseAction(card, button.dataset.drawerReview);
+    });
+  });
+  const withdraw = $("#note-actions [data-drawer-withdraw]");
+  if (withdraw) {
+    withdraw.addEventListener("click", async () => {
+      await withdrawQueued(note.path);
+      if (noteDrawerOpenState()) await openNote({ path: note.path }, { push: false });
+    });
+  }
+  const promote = $("#note-actions [data-drawer-promote]");
+  if (promote) promote.addEventListener("click", () => openAngleDialog(note.path, note.title));
+}
+
+function renderNoteDrawer(note) {
+  state.note.current = note;
+  const meta = note.frontmatter || {};
+  $("#note-path").textContent = note.path.length > 58 ? `…${note.path.slice(-58)}` : note.path;
+  $("#note-obsidian").href = note.obsidian_uri;
+  $("#note-kicker").textContent = [note.kind, statusLabelOf(note.kind, note.status) || note.status]
+    .filter(Boolean).join(" · ") || "笔记";
+  $("#note-title").textContent = note.title;
+  const chips = [];
+  const score = Number(meta.priority_score || meta.relevance_score || 0);
+  if (score) chips.push(`<span class="kprop score">${score}</span>`);
+  chips.push(...valueProps({
+    knowledge_value: meta.knowledge_value_score || meta.knowledge_value || "",
+    writing_value: meta.writing_value_score || meta.writing_value || "",
+    timeliness: meta.timeliness || meta.freshness_status || "",
+  }));
+  if (meta.selected_angle) chips.push(`<span class="kprop">角度：${escapeHtml(meta.selected_angle)}</span>`);
+  if (meta.fresh_until) chips.push(`<span class="kprop timeliness">新鲜至 ${escapeHtml(meta.fresh_until)}</span>`);
+  const source = safeHttpUrl(meta.source_url || "");
+  if (source) chips.push(`<a class="kprop link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">来源 ↗</a>`);
+  $("#note-chips").innerHTML = chips.join("");
+  $("#note-actions").innerHTML = noteContextActions(note);
+  $("#note-body").innerHTML = renderMarkdown(note.body, { skipTitle: note.title });
+  bindNoteActions(note);
+  $("#note-back").hidden = state.note.stack.length < 2;
+  $("#note-scroll").scrollTop = 0;
+}
+
+async function openNote(ref, { push = true, follow = false } = {}) {
+  const query = ref.path
+    ? `path=${encodeURIComponent(ref.path)}`
+    : `link=${encodeURIComponent(ref.link || "")}`;
+  try {
+    const note = await api(`/api/note?${query}`);
+    if (push && state.note.current?.path !== note.path) state.note.stack.push(note.path);
+    if (!push && state.note.stack.length) state.note.stack[state.note.stack.length - 1] = note.path;
+    if (!state.note.stack.length) state.note.stack.push(note.path);
+    state.note.follow = follow;
+    renderNoteDrawer(note);
+    if (!noteDrawerOpenState()) {
+      const drawer = $("#note-drawer");
+      drawer.classList.add("open");
+      drawer.setAttribute("aria-hidden", "false");
+      drawer.removeAttribute("inert");
+      $("#note-scrim").hidden = false;
+      requestAnimationFrame(() => $("#note-scrim").classList.add("visible"));
+      state.note.open = true;
+    }
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function closeNoteDrawer() {
+  const drawer = $("#note-drawer");
+  drawer.classList.remove("open");
+  drawer.setAttribute("aria-hidden", "true");
+  drawer.setAttribute("inert", "");
+  $("#note-scrim").classList.remove("visible");
+  setTimeout(() => { $("#note-scrim").hidden = true; }, 250);
+  state.note = { open: false, follow: false, stack: [], current: null };
+}
+
+async function noteDrawerBack() {
+  if (state.note.stack.length < 2) return;
+  state.note.stack.pop();
+  const previous = state.note.stack[state.note.stack.length - 1];
+  await openNote({ path: previous }, { push: false });
+}
+
+function syncNoteDrawerWithReview() {
+  if (!noteDrawerOpenState() || !state.note.follow) return;
+  const cards = filteredReviews();
+  const item = cards[state.reviewIndex];
+  if (item) {
+    state.note.stack = [item.path];
+    openNote({ path: item.path }, { push: false, follow: true });
+  } else {
+    closeNoteDrawer();
+  }
+}
+
+/* ---- 立项角度弹窗 ---- */
+
+function openAngleDialog(path, title = "") {
+  state.angleTarget = path;
+  const source = title
+    || (state.data?.topic_candidates || []).concat(state.data?.topic_continuations || [])
+      .find((item) => item.path === path)?.title
+    || path.split("/").pop().replace(/\.md$/, "");
+  $("#angle-topic-title").textContent = source;
+  $("#angle-scrim").hidden = false;
+  $("#angle-dialog").hidden = false;
+  setTimeout(() => $("#angle-input").focus(), 60);
+}
+
+function closeAngleDialog() {
+  state.angleTarget = null;
+  $("#angle-dialog").hidden = true;
+  $("#angle-scrim").hidden = true;
+  $("#angle-input").value = "";
+}
+
+async function submitAngleDialog() {
+  const path = state.angleTarget;
+  const angle = $("#angle-input").value.trim();
+  if (!path || !angle) return;
+  const button = $("#angle-dialog button[type=submit]");
+  button.disabled = true;
+  button.textContent = "正在立项…";
+  try {
+    const result = await api("/api/promote", {
+      method: "POST",
+      body: JSON.stringify({ path, angle }),
+    });
+    closeAngleDialog();
+    await loadDashboard({ quiet: true });
+    showToast("已立项，写作任务已建好");
+    if (result.writing_task) await openNote({ path: result.writing_task });
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "建立写作任务";
+  }
 }
 
 function connectEvents() {
@@ -474,7 +932,7 @@ function connectEvents() {
 }
 
 async function refreshFromEvents() {
-  const busy = $("#capture-drawer").classList.contains("open") || !$("#action-menu").hidden || state.dragging;
+  const busy = $("#capture-drawer").classList.contains("open") || !$("#action-menu").hidden || !$("#angle-dialog").hidden || state.dragging;
   if (busy) {
     clearTimeout(state.eventTimer);
     state.eventTimer = setTimeout(refreshFromEvents, 3000);
@@ -578,10 +1036,10 @@ async function runSearch() {
     const payload = await api(`/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent($("#search-scope").value)}`);
     $("#search-summary").textContent = payload.results.length ? `找到 ${payload.results.length} 条结果` : "没有找到相关笔记";
     $("#search-results").innerHTML = payload.results.map((item) => `
-      <a class="search-result" href="${escapeHtml(item.obsidian_uri)}">
+      <a class="search-result" href="#" data-note-path="${escapeHtml(item.path)}">
         <strong>${escapeHtml(item.title)}</strong>
         <p>${escapeHtml(item.excerpt)}</p>
-        <span>↗</span>
+        <span>→</span>
       </a>
     `).join("") || `<p class="empty-row">换一个更短的关键词试试。</p>`;
   } catch (error) {
@@ -639,7 +1097,9 @@ function bindEvents() {
       return;
     }
     if (event.key === "Escape") {
-      if (!$("#action-menu").hidden) hideActionMenu();
+      if (!$("#angle-dialog").hidden) closeAngleDialog();
+      else if (!$("#action-menu").hidden) hideActionMenu();
+      else if (noteDrawerOpenState()) closeNoteDrawer();
       else if ($("#capture-drawer").classList.contains("open")) closeCapture();
       else {
         $("#global-search").value = "";
@@ -649,8 +1109,15 @@ function bindEvents() {
     }
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.target instanceof Element && event.target.closest("input, textarea, select")) return;
-    if (!$("#action-menu").hidden) return;
+    if (!$("#action-menu").hidden || !$("#angle-dialog").hidden) return;
     const key = event.key.toLowerCase();
+    if (key === "u" && state.undo) {
+      event.preventDefault();
+      undoAction();
+      return;
+    }
+    // 抽屉在静态阅读（非审核跟随）时，屏蔽审核快捷键，避免对着看不见的卡片操作。
+    if (noteDrawerOpenState() && !state.note.follow) return;
     const cards = filteredReviews();
     const item = cards[state.reviewIndex];
     if (key === "j" || key === "k") {
@@ -658,19 +1125,49 @@ function bindEvents() {
       event.preventDefault();
       state.reviewIndex = Math.min(cards.length - 1, Math.max(0, state.reviewIndex + (key === "j" ? 1 : -1)));
       renderReview();
-    } else if (KEY_ACTIONS[key] && item) {
+      syncNoteDrawerWithReview();
+    } else if (reviewActions().some((action) => String(action.shortcut) === key) && item) {
       event.preventDefault();
-      chooseAction(item, KEY_ACTIONS[key]);
-    } else if (key === "u" && state.undo) {
-      event.preventDefault();
-      undoAction();
+      const action = reviewActions().find((candidate) => String(candidate.shortcut) === key);
+      chooseAction(item, action.key);
     } else if (key === "o" && item) {
       event.preventDefault();
-      window.location.href = item.obsidian_uri;
+      if (event.shiftKey) {
+        window.location.href = item.obsidian_uri;
+      } else if (noteDrawerOpenState() && state.note.follow) {
+        closeNoteDrawer();
+      } else {
+        openNote({ path: item.path }, { follow: true });
+      }
     } else if (key === "/") {
       event.preventDefault();
       $("#global-search").focus();
     }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const noteLink = event.target.closest("[data-note-path]");
+    if (noteLink) {
+      event.preventDefault();
+      openNote({ path: noteLink.dataset.notePath }, { follow: noteLink.dataset.noteFollow === "1" });
+      return;
+    }
+    const wiki = event.target.closest("[data-wikilink]");
+    if (wiki) {
+      event.preventDefault();
+      openNote({ link: wiki.dataset.wikilink });
+    }
+  });
+
+  $("#note-close").addEventListener("click", closeNoteDrawer);
+  $("#note-scrim").addEventListener("click", closeNoteDrawer);
+  $("#note-back").addEventListener("click", noteDrawerBack);
+  $("#angle-cancel").addEventListener("click", closeAngleDialog);
+  $("#angle-scrim").addEventListener("click", closeAngleDialog);
+  $("#angle-dialog").addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitAngleDialog();
   });
   document.addEventListener("pointerdown", (event) => {
     const menu = $("#action-menu");

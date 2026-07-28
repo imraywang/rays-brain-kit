@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "key": "both",
+      "label": "同时沉淀知识并加入候选选题",
+      "ui_label": "知识 + 选题",
+      "shortcut": 3,
+      "aliases": [
+        "知识和选题都保留",
+        "同时进入长期知识库和候选选题",
+        "同时进入长期知识与候选选题",
+        "知识+选题"
+      ]
+    },
+    {
+      "key": "knowledge",
+      "label": "只沉淀为长期知识",
+      "ui_label": "沉淀为知识",
+      "shortcut": 1,
+      "aliases": [
+        "批准进入长期知识库"
+      ]
+    },
+    {
+      "key": "topic",
+      "label": "只加入候选选题",
+      "ui_label": "加入候选选题",
+      "shortcut": 2,
+      "aliases": [
+        "加入候选选题",
+        "仅保留为写作素材",
+        "进入写作",
+        "进入候选选题"
+      ]
+    },
+    {
+      "key": "paused",
+      "label": "暂缓",
+      "ui_label": "稍后再看",
+      "shortcut": 4,
+      "aliases": []
+    },
+    {
+      "key": "cleanup",
+      "label": "标记为可恢复的待清理项",
+      "ui_label": "移入待清理",
+      "shortcut": 5,
+      "aliases": [
+        "移入可恢复的待清理区"
+      ]
+    }
+  ],
+  "key_aliases": {
+    "writing": "topic",
+    "later": "paused"
+  }
+}
