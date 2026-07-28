@@ -3,23 +3,16 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.rays-brain.health-weekly</string>
+	<string>com.ray.knowledge-ingest</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/bin/env</string>
 		<string>python3</string>
-		<string>__VAULT__/50-系统/40-自动化/知识采集/knowledge_health.py</string>
-		<string>weekly</string>
+		<string>__VAULT__/50-系统/40-自动化/知识采集/knowledge_ingest.py</string>
+		<string>run</string>
 	</array>
-	<key>StartCalendarInterval</key>
-	<dict>
-		<key>Weekday</key>
-		<integer>0</integer>
-		<key>Hour</key>
-		<integer>9</integer>
-		<key>Minute</key>
-		<integer>0</integer>
-	</dict>
+	<key>StartInterval</key>
+	<integer>1800</integer>
 	<key>RunAtLoad</key>
 	<false/>
 	<key>EnvironmentVariables</key>
