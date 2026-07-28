@@ -412,25 +412,24 @@ async function withdrawQueued(path, button) {
 }
 
 function boardCard(item, column) {
+  // 看板卡片只留关键属性，价值分等完整信息在阅读抽屉里看；否则长列会把整个版面拉得很高。
   const props = [];
   if (column === "pending" || column === "queued") {
     props.push(`<span class="kprop score">${Number(item.score) || 0}</span>`);
-    if (item.kind) props.push(`<span class="kprop">${escapeHtml(item.kind)}</span>`);
   }
   if ((column === "topics" || column === "continuations" || column === "tasks") && Number(item.priority_score)) {
     props.push(`<span class="kprop score">优先 ${Number(item.priority_score)}</span>`);
   }
-  props.push(...valueProps(item));
+  if (column === "tasks") {
+    const statusLabel = statusLabelOf(item.kind, item.status);
+    if (statusLabel) props.push(`<span class="kprop status">${escapeHtml(statusLabel)}</span>`);
+  }
   if (column === "queued") {
     props.push(`<span class="kprop action ${escapeHtml(item.selected_action || "")}">${escapeHtml(actionName(item.selected_action))}</span>`);
   }
   if (column === "published" && item.platform) props.push(`<span class="kprop">${escapeHtml(item.platform)}</span>`);
   if (column === "feedback" && item.due_at) props.push(`<span class="kprop timeliness">截止 ${escapeHtml(String(item.due_at))}</span>`);
   if (item.modified) props.push(`<span class="kprop time">${escapeHtml(formatRecent(item.modified))}</span>`);
-  const statusLabel = statusLabelOf(item.kind, item.status);
-  if (statusLabel && ["topics", "continuations", "tasks"].includes(column)) {
-    props.unshift(`<span class="kprop status">${escapeHtml(statusLabel)}</span>`);
-  }
   const draggable = ["pending", "queued", "topics", "continuations"].includes(column);
   return `
     <div class="kcard${draggable ? " draggable" : ""}" ${draggable ? 'draggable="true"' : ""} data-card-path="${escapeHtml(item.path)}" data-card-column="${column}">

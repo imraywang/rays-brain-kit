@@ -428,12 +428,24 @@ kbd { padding: 2px 5px; color: var(--muted); border: 1px solid var(--rule); bord
 .col-dot.green { background: var(--green); }
 .board-col-head strong { font-size: 12.5px; font-weight: 650; }
 .board-col-count { margin-left: auto; padding: 1px 7px; border-radius: 999px; color: var(--muted); background: rgba(55, 53, 47, .08); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.board-cards { display: grid; gap: 5px; min-height: 44px; }
+.board-cards {
+  display: grid;
+  gap: 5px;
+  min-height: 44px;
+  max-height: clamp(320px, 54vh, 580px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+.board-cards::-webkit-scrollbar { width: 6px; }
+.board-cards::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--rule-strong); }
+.board-cards::-webkit-scrollbar-track { background: transparent; }
 .kcard {
   position: relative;
   display: grid;
-  gap: 6px;
-  padding: 9px 10px;
+  gap: 5px;
+  padding: 8px 10px;
   border: 1px solid var(--rule);
   border-radius: var(--radius-sm);
   background: #fff;
