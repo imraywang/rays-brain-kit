@@ -12,7 +12,9 @@
         "required": [
           "id", "title", "recommendation", "relevance_score", "confidence",
           "reason", "summary", "core_claims", "evidence", "counterpoints",
-          "connections", "writing_angles", "suggested_kind", "topics"
+          "connections", "writing_angles", "suggested_kind", "topics",
+          "knowledge_value_score", "writing_value_score", "time_sensitivity",
+          "reader_value"
         ],
         "properties": {
           "id": {"type": "string"},
@@ -22,6 +24,26 @@
           },
           "recommendation": {"type": "string", "enum": ["保留", "待观察", "清理"]},
           "relevance_score": {"type": "integer", "minimum": 0, "maximum": 100},
+          "knowledge_value_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "这份素材形成跨文章长期知识的价值"
+          },
+          "writing_value_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "这份素材在近期形成高质量文章的价值"
+          },
+          "time_sensitivity": {
+            "type": "string",
+            "enum": ["强时效", "中时效", "常青"]
+          },
+          "reader_value": {
+            "type": "string",
+            "description": "读完相关文章后，读者能获得的具体判断、方法、节省或行动"
+          },
           "confidence": {"type": "string", "enum": ["高", "中", "低"]},
           "reason": {"type": "string"},
           "summary": {"type": "string"},
@@ -30,7 +52,7 @@
           "counterpoints": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
           "connections": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
           "writing_angles": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
-          "suggested_kind": {"type": "string", "enum": ["概念", "观点", "案例", "方法", "选题", "无"]},
+          "suggested_kind": {"type": "string", "enum": ["概念", "人物与组织", "问题", "观点", "案例", "方法", "无"]},
           "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 6}
         }
       }

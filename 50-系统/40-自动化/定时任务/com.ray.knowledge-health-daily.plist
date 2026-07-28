@@ -3,16 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.rays-brain.ingest</string>
+	<string>com.ray.knowledge-health-daily</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/bin/env</string>
 		<string>python3</string>
-		<string>__VAULT__/50-系统/40-自动化/知识采集/knowledge_ingest.py</string>
-		<string>run</string>
+		<string>__VAULT__/50-系统/40-自动化/知识采集/knowledge_health.py</string>
+		<string>daily</string>
 	</array>
-	<key>StartInterval</key>
-	<integer>1800</integer>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>18</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
 	<key>RunAtLoad</key>
 	<false/>
 	<key>EnvironmentVariables</key>

@@ -3,34 +3,37 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.rays-brain.health-daily</string>
+	<string>com.ray.content-snapshot</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/bin/env</string>
 		<string>python3</string>
-		<string>__VAULT__/50-系统/40-自动化/知识采集/knowledge_health.py</string>
-		<string>daily</string>
+		<string>__VAULT__/50-系统/40-自动化/内容快照/content_snapshot.py</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict>
 		<key>Hour</key>
 		<integer>18</integer>
 		<key>Minute</key>
-		<integer>0</integer>
+		<integer>5</integer>
 	</dict>
 	<key>RunAtLoad</key>
 	<false/>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>LANG</key>
+		<string>en_US.UTF-8</string>
+		<key>LC_ALL</key>
+		<string>en_US.UTF-8</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>RAYS_BRAIN</key>
 		<string>__VAULT__</string>
 	</dict>
 	<key>StandardOutPath</key>
-	<string>__HOME__/Library/Logs/rays-brain/launchd.out.log</string>
+	<string>__HOME__/Library/Logs/rays-brain/content-snapshot.log</string>
 	<key>StandardErrorPath</key>
-	<string>__HOME__/Library/Logs/rays-brain/launchd.err.log</string>
+	<string>__HOME__/Library/Logs/rays-brain/content-snapshot.log</string>
 	<key>ProcessType</key>
 	<string>Background</string>
 </dict>
