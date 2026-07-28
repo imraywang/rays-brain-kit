@@ -605,6 +605,26 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes rise { from { transform: translateY(6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
+/* ---- 宽屏自适应：4K/超宽屏放开版心，看板优先吃满宽度 ---- */
+
+@media (min-width: 1520px) {
+  #dashboard { max-width: 1480px; }
+  .board { grid-auto-columns: minmax(185px, 1fr); }
+  .recent-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .review-layout { grid-template-columns: minmax(0, 1.7fr) minmax(300px, .65fr); }
+}
+
+@media (min-width: 1800px) {
+  :root { --rail-width: 256px; }
+  main { padding: 0 56px 48px; }
+  .topbar { margin: 0 -56px; padding: 0 56px; }
+  .search-tray { right: 56px; left: calc(var(--rail-width) + 56px); }
+  #dashboard { max-width: 1780px; }
+  .board { grid-auto-columns: minmax(180px, 1fr); }
+  .board-cards { max-height: clamp(360px, 60vh, 720px); }
+  .metric-ledger { grid-template-columns: repeat(4, 1fr); }
+}
+
 @media (max-width: 1120px) {
   :root { --rail-width: 200px; }
   main { padding: 0 24px 32px; }
@@ -901,6 +921,10 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
   .rail-module, .rail-system, .rail-health-dot { display: none; }
   .rail-link { position: relative; }
   .rail-badge { position: absolute; top: 3px; right: max(8px, 18%); min-width: 16px; padding: 0 5px; font-size: 9px; line-height: 15px; }
+}
+
+@media (min-width: 1800px) {
+  .note-drawer { width: min(720px, 100%); }
 }
 
 @media (prefers-reduced-motion: reduce) {
