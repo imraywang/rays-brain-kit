@@ -16,6 +16,7 @@ REVIEW_DIR = VAULT / "10-创作/10-灵感/10-待评估/存量知识复核"
 REFERENCE_DIR = VAULT / "30-资料/20-参考资料/历史知识降级"
 ARCHIVE_DIR = VAULT / "90-归档/90-待清理" / datetime.now().astimezone().date().isoformat()
 BACKUP_DIR = VAULT / "90-归档/10-迁移记录"
+REVIEW_RECORD_DIR = VAULT / "90-归档/20-审核记录/存量知识复核"
 
 ACTIONS = {
     "保留为长期知识": "keep",
@@ -121,6 +122,22 @@ def replace_active_links(old_rel: str, replacement_rel: str) -> int:
     return changed
 
 
+def replace_review_record_paths(old_rel: str, replacement_rel: str) -> int:
+    """审核卡归档后，修正其他笔记中对审核记录的显式路径。"""
+    old_note = old_rel[:-3] if old_rel.endswith(".md") else old_rel
+    new_note = replacement_rel[:-3] if replacement_rel.endswith(".md") else replacement_rel
+    changed = 0
+    for path in VAULT.rglob("*.md"):
+        if path == VAULT / replacement_rel:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        updated = text.replace(old_rel, replacement_rel).replace(old_note, new_note)
+        if updated != text:
+            path.write_text(updated, encoding="utf-8")
+            changed += 1
+    return changed
+
+
 def backup(paths: list[Path]) -> Path:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d-%H%M%S")
@@ -149,7 +166,7 @@ def collect_ready() -> list[tuple[Path, str, dict[str, str]]]:
 
 
 def apply() -> dict[str, Any]:
-    result: dict[str, Any] = {"processed": 0, "keep": 0, "merge": 0, "reference": 0, "cleanup": 0, "waiting": 0, "links_updated": 0, "backup": ""}
+    result: dict[str, Any] = {"processed": 0, "archived": 0, "keep": 0, "merge": 0, "reference": 0, "cleanup": 0, "waiting": 0, "links_updated": 0, "backup": ""}
     ready = collect_ready()
     backup_paths = [card for card, _, _ in ready]
     for _, _, meta in ready:
@@ -223,7 +240,16 @@ def apply() -> dict[str, Any]:
             "result_file": target_rel,
         }
         card.write_text(update_frontmatter(card_text, card_updates), encoding="utf-8")
+        old_card_rel = card.relative_to(VAULT).as_posix()
+        month = card_updates["action_processed_at"][:7]
+        archive_root = REVIEW_RECORD_DIR / month
+        archive_root.mkdir(parents=True, exist_ok=True)
+        archived_card = unique_destination(archive_root, card.name)
+        shutil.move(card, archived_card)
+        archived_card_rel = archived_card.relative_to(VAULT).as_posix()
+        result["links_updated"] += replace_review_record_paths(old_card_rel, archived_card_rel)
         result["processed"] += 1
+        result["archived"] += 1
         result[action] += 1
     return result
 
