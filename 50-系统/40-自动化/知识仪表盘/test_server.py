@@ -62,6 +62,10 @@ source_url: "https://example.com"
         self.ingest_script = self.vault / "知识采集/knowledge_ingest.py"
         self.ingest_script.parent.mkdir(parents=True, exist_ok=True)
         self.ingest_script.write_text("# 测试占位\n", encoding="utf-8")
+        # 登记发布同理：脚本存在性检查发生在 mock 之前
+        self.record_script = self.vault / "发布归档/record_published.py"
+        self.record_script.parent.mkdir(parents=True, exist_ok=True)
+        self.record_script.write_text("# 测试占位\n", encoding="utf-8")
         self.patchers = [
             mock.patch.object(dashboard, "VAULT", self.vault),
             mock.patch.object(dashboard, "REVIEW_DIR", self.review_dir),
@@ -71,6 +75,7 @@ source_url: "https://example.com"
                 dashboard, "INTENT_QUEUE_FILE", self.vault / "50-系统/40-自动化/AI任务队列.md"
             ),
             mock.patch.object(dashboard, "INGEST_SCRIPT", self.ingest_script),
+            mock.patch.object(dashboard, "RECORD_SCRIPT", self.record_script),
             mock.patch.object(dashboard, "STATE_HOME", self.vault / ".state"),
         ]
         for patcher in self.patchers:
