@@ -236,10 +236,13 @@ source_url: "https://example.com"
             encoding="utf-8",
         )
         payload = dashboard.dashboard_payload()
-        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["schema_version"], 4)
         self.assertTrue(payload["server_started_at"])
         self.assertIn("topic-candidate", payload["board_protocol"])
         self.assertIn("content-feedback", payload["board_protocol"])
+        self.assertIn("last_activity", payload["pipeline"])
+        self.assertEqual(payload["pipeline"]["unresolved_errors"], 0)
+        self.assertEqual(payload["reports"], [])
         self.assertEqual(
             [(item["shortcut"], item["key"]) for item in payload["review_actions"]],
             [

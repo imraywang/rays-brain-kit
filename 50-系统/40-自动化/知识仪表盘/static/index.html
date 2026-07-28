@@ -17,17 +17,29 @@
       <a class="brand" href="#today" aria-label="Ray's Brain 首页">
         <span class="brand-mark">🧠</span>
         <span class="brand-copy"><strong>Ray's Brain</strong><small>本地知识工作台</small></span>
+        <span class="rail-health-dot" id="rail-health-dot" role="status" aria-label="系统状态"></span>
       </a>
 
       <p class="rail-label">工作区</p>
       <nav class="rail-nav">
         <a class="rail-link active" href="#today"><span>☀️</span>今日</a>
-        <a class="rail-link" href="#review"><span>📥</span>审核</a>
-        <a class="rail-link" href="#board"><span>📋</span>看板</a>
+        <a class="rail-link" href="#review"><span>📥</span>审核<em class="rail-badge red" id="badge-review" hidden></em></a>
+        <a class="rail-link" href="#board"><span>📋</span>看板<em class="rail-badge yellow" id="badge-board" hidden></em></a>
         <a class="rail-link" href="#knowledge"><span>🌱</span>知识</a>
       </nav>
 
+      <div class="rail-module" id="rail-active-block" hidden>
+        <p class="rail-label">正在推进</p>
+        <div class="rail-cards" id="rail-active"></div>
+      </div>
+
+      <div class="rail-module" id="rail-resume-block" hidden>
+        <p class="rail-label">继续上次</p>
+        <div class="rail-resume" id="rail-resume"></div>
+      </div>
+
       <div class="rail-bottom">
+        <div class="rail-system" id="rail-system"></div>
         <button class="rail-action" id="capture-open" type="button">
           <span>＋</span>记下灵感
         </button>

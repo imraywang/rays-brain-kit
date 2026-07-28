@@ -11,7 +11,7 @@ const state = {
   angleTarget: null,
 };
 
-const EXPECTED_SCHEMA_VERSION = 3;
+const EXPECTED_SCHEMA_VERSION = 4;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -151,12 +151,82 @@ function renderDashboard() {
   $("#open-inbox").href = data.inbox_uri;
 
   renderPipeline(counts);
+  renderRail();
   renderReview();
   renderQueued();
   renderBoard();
   renderTrend();
   renderKnowledgeMix();
   renderRecent();
+}
+
+/* ---- 侧栏工作篮 ---- */
+
+function recentNotes() {
+  try {
+    const list = JSON.parse(localStorage.getItem("rb-recent-notes") || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberNote(note) {
+  const list = recentNotes().filter((item) => item.path !== note.path);
+  list.unshift({ path: note.path, title: note.title });
+  try {
+    localStorage.setItem("rb-recent-notes", JSON.stringify(list.slice(0, 6)));
+  } catch { /* 隐私模式等场景下没有 localStorage，侧栏少一个模块而已 */ }
+  if (state.data) renderRail();
+}
+
+function renderRail() {
+  const d = state.data;
+  if (!d) return;
+  const counts = d.counts;
+  const badgeReview = $("#badge-review");
+  badgeReview.hidden = !counts.decision_pending;
+  badgeReview.textContent = String(counts.decision_pending);
+  const badgeBoard = $("#badge-board");
+  badgeBoard.hidden = !counts.feedback_pending;
+  badgeBoard.textContent = String(counts.feedback_pending);
+  badgeBoard.title = `${counts.feedback_pending} 篇已发布内容待复盘`;
+  const healthNames = { green: "运行正常", yellow: "需要关注", red: "出现异常" };
+  const dot = $("#rail-health-dot");
+  dot.className = `rail-health-dot ${d.health}`;
+  dot.title = healthNames[d.health] || "状态未知";
+
+  const active = [...(d.writing_tasks || []), ...(d.drafts || [])]
+    .sort((a, b) => String(b.modified || "").localeCompare(String(a.modified || "")))
+    .slice(0, 2);
+  $("#rail-active-block").hidden = !active.length;
+  $("#rail-active").innerHTML = active.map((item) => {
+    const status = statusLabelOf(item.kind, item.status);
+    return `
+      <a class="rail-card" href="#" data-note-path="${escapeHtml(item.path)}">
+        <strong>${escapeHtml(item.title)}</strong>
+        <small>${escapeHtml(item.kind || "")}${status ? ` · ${escapeHtml(status)}` : ""}</small>
+      </a>`;
+  }).join("");
+
+  const resume = recentNotes()
+    .filter((item) => !active.some((row) => row.path === item.path))
+    .slice(0, 3);
+  $("#rail-resume-block").hidden = !resume.length;
+  $("#rail-resume").innerHTML = resume.map((item) => `
+    <a class="rail-resume-item" href="#" data-note-path="${escapeHtml(item.path)}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</a>
+  `).join("");
+
+  const pipeline = d.pipeline || {};
+  const errors = Number(pipeline.unresolved_errors || 0);
+  const rows = [`
+    <span class="rail-sys${errors ? " alert" : ""}" title="采集管线状态${pipeline.pending ? `，待处理 ${pipeline.pending} 条` : ""}">
+      <span>⟳</span>采集 ${pipeline.last_activity ? escapeHtml(formatRecent(pipeline.last_activity)) : "未运行"}${errors ? ` · ${errors} 个错误` : ""}
+    </span>`];
+  (d.reports || []).forEach((report) => rows.push(`
+    <a class="rail-sys link" href="#" data-note-path="${escapeHtml(report.path)}"><span>📄</span>${escapeHtml(report.title)}</a>
+  `));
+  $("#rail-system").innerHTML = rows.join("");
 }
 
 function renderPipeline(counts) {
@@ -833,6 +903,7 @@ async function openNote(ref, { push = true, follow = false } = {}) {
     if (!push && state.note.stack.length) state.note.stack[state.note.stack.length - 1] = note.path;
     if (!state.note.stack.length) state.note.stack.push(note.path);
     state.note.follow = follow;
+    rememberNote(note);
     renderNoteDrawer(note);
     if (!noteDrawerOpenState()) {
       const drawer = $("#note-drawer");

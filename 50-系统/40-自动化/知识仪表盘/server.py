@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 
 HERE = Path(__file__).resolve().parent
-DASHBOARD_SCHEMA_VERSION = 3
+DASHBOARD_SCHEMA_VERSION = 4
 SERVER_STARTED_AT = datetime.now().astimezone().isoformat(timespec="seconds")
 DEFAULT_VAULT = HERE.parents[2]
 VAULT = Path(os.environ.get("RAYS_BRAIN", str(DEFAULT_VAULT))).resolve()
@@ -828,6 +828,23 @@ def dashboard_payload() -> dict[str, object]:
     runtime = load_runtime_state()
     unresolved_errors = [item for item in runtime.get("errors", []) if not item.get("resolved_at")]
     pipeline_pending = len(runtime.get("pending_sources", []))
+    try:
+        # state.json 每轮采集都会保存，它的 mtime 就是管线最近一次活动时间
+        pipeline_last_activity = (
+            datetime.fromtimestamp((STATE_HOME / "state.json").stat().st_mtime)
+            .astimezone()
+            .isoformat(timespec="minutes")
+        )
+    except OSError:
+        pipeline_last_activity = ""
+    reports = [
+        entry
+        for entry in (
+            {"title": "健康日报", "path": "00-入口/20-日报/知识库健康日报/最新健康日报.md"},
+            {"title": "知识库周报", "path": "00-入口/20-日报/知识库周报/最新知识库周报.md"},
+        )
+        if (VAULT / entry["path"]).is_file()
+    ]
     health = str(latest_snapshot.get("health", "unknown"))
     health_reasons = [
         str(reason)
@@ -881,6 +898,12 @@ def dashboard_payload() -> dict[str, object]:
         "health_reasons": health_reasons,
         "review_actions": UI_ACTIONS,
         "board_protocol": client_board_protocol(),
+        "pipeline": {
+            "last_activity": pipeline_last_activity,
+            "unresolved_errors": len(unresolved_errors),
+            "pending": pipeline_pending,
+        },
+        "reports": reports,
         "focus": focus,
         "counts": {
             "all_notes": len(files),

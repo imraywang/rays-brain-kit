@@ -416,7 +416,7 @@ kbd { padding: 2px 5px; color: var(--muted); border: 1px solid var(--rule); bord
 
 /* ---- 进展看板 ---- */
 
-.board { display: grid; grid-template-columns: repeat(7, minmax(200px, 1fr)); gap: 9px; align-items: start; overflow-x: auto; padding-bottom: 6px; }
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 1fr); gap: 9px; align-items: start; overflow-x: auto; padding-bottom: 6px; }
 .board-col { padding: 5px; border-radius: var(--radius-sm); background: var(--sidebar); transition: background 120ms ease, box-shadow 120ms ease; }
 .board-col.drop-target { background: var(--blue-soft); box-shadow: inset 0 0 0 2px var(--accent); }
 .board-col-head { display: flex; align-items: center; gap: 7px; padding: 5px 7px 8px; }
@@ -602,7 +602,7 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
   .pipeline { grid-template-columns: repeat(3, 1fr); }
   .metric-ledger { grid-template-columns: repeat(2, 1fr); }
   .review-layout { grid-template-columns: minmax(0, 1.35fr) minmax(270px, .8fr); }
-  .board { grid-template-columns: repeat(6, minmax(190px, 1fr)); }
+  .board { grid-auto-columns: minmax(190px, 1fr); }
   .knowledge-grid { grid-template-columns: 1fr; }
 }
 
@@ -813,10 +813,82 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
 .ghost-button { min-height: 34px; padding: 0 14px; border: 1px solid var(--rule); border-radius: var(--radius-sm); color: var(--muted-strong); background: #fff; cursor: pointer; }
 .ghost-button:hover { background: var(--hover); color: var(--ink); }
 
+/* ---- 侧栏工作篮 ---- */
+
+.rail-health-dot { width: 8px; height: 8px; flex: none; margin-left: auto; border-radius: 50%; background: var(--rule-strong); }
+.rail-health-dot.green { background: var(--green); }
+.rail-health-dot.yellow { background: var(--yellow); }
+.rail-health-dot.red { background: var(--red); }
+
+.rail-badge {
+  margin-left: auto;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 650;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.rail-badge.red { color: var(--red); background: var(--red-soft); }
+.rail-badge.yellow { color: var(--yellow); background: var(--yellow-soft); }
+
+.rail-module { margin-top: 18px; min-height: 0; }
+.rail-cards { display: grid; gap: 5px; }
+.rail-card {
+  display: grid;
+  gap: 2px;
+  padding: 8px 9px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  text-decoration: none;
+  transition: background 100ms ease;
+}
+.rail-card:hover { background: var(--surface-raised); }
+.rail-card strong { overflow: hidden; font-size: 12px; font-weight: 600; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.rail-card small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.rail-resume { display: grid; gap: 1px; }
+.rail-resume-item {
+  display: block;
+  overflow: hidden;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--muted-strong);
+  font-size: 12px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-resume-item:hover { background: var(--hover); color: var(--ink); }
+
+.rail-system { display: grid; gap: 2px; margin-bottom: 8px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.rail-sys {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 11px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-sys span { flex: none; font-size: 12px; }
+.rail-sys.alert { color: var(--red); background: var(--red-soft); }
+.rail-sys.link { color: var(--muted-strong); }
+.rail-sys.link:hover { background: var(--hover); color: var(--ink); }
+
 @media (max-width: 780px) {
   .note-drawer { width: 100%; }
   .note-scroll { padding: 18px 16px max(24px, env(safe-area-inset-bottom)); }
   .note-title { font-size: 20px; }
+  .rail-module, .rail-system, .rail-health-dot { display: none; }
+  .rail-link { position: relative; }
+  .rail-badge { position: absolute; top: 3px; right: max(8px, 18%); min-width: 16px; padding: 0 5px; font-size: 9px; line-height: 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
