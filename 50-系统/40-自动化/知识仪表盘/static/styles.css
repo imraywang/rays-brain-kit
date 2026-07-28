@@ -821,6 +821,17 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
 .pipe-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
 .pipe-run { display: flex; align-items: center; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
 .pipe-run span { color: var(--muted); font-size: 11px; }
+.pipe-draft-run {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #d9ccf0;
+  border-radius: var(--radius-sm);
+  background: var(--purple-soft);
+  color: var(--purple);
+  font-size: 12.5px;
+}
+.pipe-draft-run a { color: var(--purple); font-weight: 600; }
+.pipe-draft-run small { display: block; margin-top: 3px; color: var(--muted); font-size: 10.5px; }
 .pipe-heading { margin: 18px 0 8px; font-size: 13px; font-weight: 650; }
 .pipe-errors { display: grid; gap: 6px; }
 .pipe-error {

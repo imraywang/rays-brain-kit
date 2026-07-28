@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 
 HERE = Path(__file__).resolve().parent
-DASHBOARD_SCHEMA_VERSION = 5
+DASHBOARD_SCHEMA_VERSION = 6
 SERVER_STARTED_AT = datetime.now().astimezone().isoformat(timespec="seconds")
 DEFAULT_VAULT = HERE.parents[2]
 VAULT = Path(os.environ.get("RAYS_BRAIN", str(DEFAULT_VAULT))).resolve()
@@ -36,6 +36,7 @@ REVIEW_PROTOCOL_FILE = HERE.parent / "review_protocol.json"
 BOARD_PROTOCOL_FILE = HERE.parent / "board_protocol.json"
 INGEST_SCRIPT = HERE.parent / "知识采集" / "knowledge_ingest.py"
 RECORD_SCRIPT = HERE.parent / "发布归档" / "record_published.py"
+DRAFT_WORKER_SCRIPT = HERE.parent / "AI执行" / "draft_worker.py"
 STATE_HOME = Path(
     os.environ.get("RAYS_BRAIN_STATE", str(Path.home() / ".local/state/rays-brain"))
 )
@@ -1480,6 +1481,52 @@ def queue_intent(rel_path: str, action: str) -> dict[str, object]:
     return {"ok": True, "queued": entry, "queue_path": relative(INTENT_QUEUE_FILE)}
 
 
+TASK_NOTE_KINDS = {"writing-task", "content-task", "content-pack"}
+TASK_INACTIVE_STATUSES = {"published", "cancelled", "completed", "archived", "closed"}
+_DRAFT_RUN: dict[str, object] = {"proc": None, "started_at": "", "target": ""}
+
+
+def draft_run_running() -> bool:
+    proc = _DRAFT_RUN["proc"]
+    return proc is not None and proc.poll() is None  # type: ignore[union-attr]
+
+
+def start_draft_run(rel_path: str) -> dict[str, object]:
+    """后台派生 Codex 起草 worker：工作台只触发和展示，不在请求线程里等它。"""
+    if draft_run_running():
+        raise ValueError(f"已有一篇在起草中（{_DRAFT_RUN['target']}），请等它完成")
+    path = vault_note_path(rel_path)
+    rel = relative(path)
+    if not rel.startswith(area_prefix("writing_tasks_dir")):
+        raise ValueError("只能对写作任务发起起草")
+    meta = parse_frontmatter(read_text(path))
+    if meta.get("kind") not in TASK_NOTE_KINDS:
+        raise ValueError("这篇笔记不是写作任务")
+    if meta.get("status", "").strip() in TASK_INACTIVE_STATUSES:
+        raise ValueError(f"任务状态是 {meta.get('status')}，不需要起草")
+    if not DRAFT_WORKER_SCRIPT.is_file():
+        raise ValueError("找不到起草执行器脚本")
+    env = {**os.environ, "RAYS_BRAIN": str(VAULT), "RAYS_BRAIN_STATE": str(STATE_HOME)}
+    log_dir = STATE_HOME / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    with (log_dir / "ai-draft.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"\n===== 工作台发起起草 {started_at} · {rel} =====\n")
+        handle.flush()
+        proc = subprocess.Popen(
+            [sys.executable, str(DRAFT_WORKER_SCRIPT), rel],
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=str(DRAFT_WORKER_SCRIPT.parent),
+        )
+    _DRAFT_RUN["proc"] = proc
+    _DRAFT_RUN["started_at"] = started_at
+    _DRAFT_RUN["target"] = rel
+    log_operation({"op": "draft-run", "path": rel, "started_at": started_at})
+    return {"ok": True, "started_at": started_at, "target": rel}
+
+
 PUBLISH_PLATFORMS = ("x", "wechat", "shipinhao", "douyin", "xiaohongshu")
 PUBLISH_ARCHIVE_RULES = {
     # 草稿 kind → (正式稿子目录, 正式稿 kind)
@@ -1670,6 +1717,9 @@ def pipeline_status() -> dict[str, object]:
         "log_tail": tail,
         "manual_run_running": manual_run_running(),
         "manual_run_started_at": str(_MANUAL_RUN["started_at"]),
+        "draft_run_running": draft_run_running(),
+        "draft_run_target": str(_DRAFT_RUN["target"]) if draft_run_running() else "",
+        "draft_run_started_at": str(_DRAFT_RUN["started_at"]) if draft_run_running() else "",
         "intents": pending_intents(),
         "intent_queue_path": relative(INTENT_QUEUE_FILE) if INTENT_QUEUE_FILE.exists() else "",
     }
@@ -1890,6 +1940,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         str(payload.get("path", "")), str(payload.get("action", ""))
                     )
                 )
+            elif parsed.path == "/api/intent/execute":
+                self.send_json(start_draft_run(str(payload.get("path", ""))))
             elif parsed.path == "/api/publish/record":
                 self.send_json(
                     record_publication(

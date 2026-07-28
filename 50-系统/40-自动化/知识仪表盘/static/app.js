@@ -13,7 +13,7 @@ const state = {
   pipelineErrors: [],
 };
 
-const EXPECTED_SCHEMA_VERSION = 5;
+const EXPECTED_SCHEMA_VERSION = 6;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -829,6 +829,7 @@ function noteContextActions(note) {
     buttons.push(`<button class="decision-button primary" type="button" data-drawer-promote="1">立项为写作任务…</button>`);
   }
   if (TASK_KINDS.includes(note.kind) && status !== "cancelled") {
+    buttons.push(`<button class="decision-button primary" type="button" data-drawer-draft="1">让 Codex 起草这篇</button>`);
     buttons.push(`<button class="decision-button topic" type="button" data-drawer-intent="draft">排入 AI 起草队列</button>`);
   }
   if (note.can_record_publish) {
@@ -874,6 +875,23 @@ function bindNoteActions(note) {
   if (promote) promote.addEventListener("click", () => openAngleDialog(note.path, note.title));
   const publish = $("#note-actions [data-drawer-publish]");
   if (publish) publish.addEventListener("click", () => openPublishDialog(note));
+  const draft = $("#note-actions [data-drawer-draft]");
+  if (draft) {
+    draft.addEventListener("click", async () => {
+      if (!window.confirm("Codex 会读取成稿包与关联材料，在后台起草几分钟，产出一篇标记为 ai-draft 的待审初稿。开始？")) return;
+      draft.disabled = true;
+      try {
+        await api("/api/intent/execute", {
+          method: "POST",
+          body: JSON.stringify({ path: note.path }),
+        });
+        showToast("Codex 起草已启动，写好会出现在「草稿」列并通知你");
+      } catch (error) {
+        showToast(error.message);
+        draft.disabled = false;
+      }
+    });
+  }
   const intent = $("#note-actions [data-drawer-intent]");
   if (intent) {
     intent.addEventListener("click", async () => {
@@ -1071,6 +1089,13 @@ function renderPipelineDrawer(status) {
       </button>
       <span>定时任务每 30 分钟也会跑一轮，通常不用手动</span>
     </div>`);
+  if (status.draft_run_running) {
+    blocks.push(`
+      <div class="pipe-draft-run">
+        ✍️ Codex 正在起草：<a href="#" data-note-path="${escapeHtml(status.draft_run_target)}">${escapeHtml(status.draft_run_target.split("/").pop())}</a>
+        <small>始于 ${escapeHtml(formatRecent(status.draft_run_started_at))}，完成后草稿列会自动出现</small>
+      </div>`);
+  }
   if (state.pipelineErrors.length) {
     blocks.push(`
       <h3 class="pipe-heading">未解决错误</h3>
@@ -1317,6 +1342,10 @@ function maybeNotify(previous, next) {
   if (!previous || !next) return;
   const gained = next.counts.decision_pending - previous.counts.decision_pending;
   if (gained > 0) notifyUser(`${gained} 张新审核卡等你判断`);
+  if (next.counts.drafts > previous.counts.drafts) {
+    const fresh = (next.drafts || []).find((item) => !(previous.drafts || []).some((old) => old.path === item.path));
+    notifyUser(fresh ? `新草稿写好了：${fresh.title}` : "有新草稿写好了");
+  }
   if (next.health === "red" && previous.health !== "red") {
     notifyUser(next.health_reasons[0] || "采集流程出现异常");
   }

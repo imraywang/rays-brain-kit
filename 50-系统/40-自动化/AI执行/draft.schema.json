@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "summary", "body_markdown"],
+  "properties": {
+    "title": { "type": "string" },
+    "summary": { "type": "string" },
+    "body_markdown": { "type": "string" },
+    "facts_used": { "type": "array", "items": { "type": "string" } },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

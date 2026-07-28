@@ -254,7 +254,7 @@ source_url: "https://example.com"
             encoding="utf-8",
         )
         payload = dashboard.dashboard_payload()
-        self.assertEqual(payload["schema_version"], 5)
+        self.assertEqual(payload["schema_version"], 6)
         self.assertTrue(payload["server_started_at"])
         self.assertIn("topic-candidate", payload["board_protocol"])
         self.assertIn("content-feedback", payload["board_protocol"])
@@ -650,6 +650,30 @@ source_url: "https://example.com"
         self.assertEqual(status["errors"], [])
         with self.assertRaisesRegex(ValueError, "处理过"):
             dashboard.resolve_pipeline_error("2026-07-28T10:00:00", "x sync failed")
+
+    def test_start_draft_run_validates_target_and_reentry(self) -> None:
+        task_dir = self.vault / dashboard.LAYOUT["writing_tasks_dir"]
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "任务.md").write_text(
+            "---\nkind: content-pack\nstatus: active\n---\n\n# 任务\n", encoding="utf-8"
+        )
+        (task_dir / "已发.md").write_text(
+            "---\nkind: content-pack\nstatus: published\n---\n\n# 已发\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "写作任务"):
+            dashboard.start_draft_run("10-创作/10-灵感/10-待评估/剪藏复核/test.md")
+        with self.assertRaisesRegex(ValueError, "不需要起草"):
+            dashboard.start_draft_run("10-创作/20-写作任务/已发.md")
+        fake_proc = mock.Mock()
+        fake_proc.poll.return_value = None
+        with mock.patch.dict(
+            dashboard._DRAFT_RUN, {"proc": fake_proc, "started_at": "x", "target": "y"}
+        ):
+            self.assertTrue(dashboard.draft_run_running())
+            with self.assertRaisesRegex(ValueError, "起草中"):
+                dashboard.start_draft_run("10-创作/20-写作任务/任务.md")
+        status = dashboard.pipeline_status()
+        self.assertFalse(status["draft_run_running"])
 
     def test_manual_run_refuses_reentry(self) -> None:
         fake_proc = mock.Mock()
