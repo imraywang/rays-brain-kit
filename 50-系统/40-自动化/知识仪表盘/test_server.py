@@ -662,5 +662,43 @@ source_url: "https://example.com"
                 )
 
 
+class DegradedProtocolTests(unittest.TestCase):
+    """协议文件缺失时的降级：服务照常启动，审核/流转功能关闭。"""
+
+    def _load_from(self, dashboard_dir: Path):
+        spec = importlib.util.spec_from_file_location(
+            "rays_dashboard_degraded", dashboard_dir / "server.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        return module
+
+    def test_missing_protocols_degrade_instead_of_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            dashboard_dir = Path(temp) / "知识仪表盘"
+            dashboard_dir.mkdir()
+            (dashboard_dir / "server.py").write_bytes(SERVER_PATH.read_bytes())
+            module = self._load_from(dashboard_dir)
+            self.assertEqual(module.ACTION_LABELS, {})
+            self.assertEqual(module.UI_ACTIONS, [])
+            self.assertEqual(module.BOARD_GROUPS, [])
+            # 勾选解析永不匹配：旧卡片上的勾选被视作未选择，而不是误改
+            self.assertIsNone(module.selected_action("- [x] 只沉淀为长期知识\n"))
+            with self.assertRaisesRegex(ValueError, "审核功能未启用"):
+                module.choose_review_action(
+                    "10-创作/10-灵感/10-待评估/剪藏复核/x.md", "knowledge"
+                )
+
+    def test_corrupt_review_protocol_still_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            dashboard_dir = Path(temp) / "知识仪表盘"
+            dashboard_dir.mkdir()
+            (dashboard_dir / "server.py").write_bytes(SERVER_PATH.read_bytes())
+            (Path(temp) / "review_protocol.json").write_text("{", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                self._load_from(dashboard_dir)
+
+
 if __name__ == "__main__":
     unittest.main()

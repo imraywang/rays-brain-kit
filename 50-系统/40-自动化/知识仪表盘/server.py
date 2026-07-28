@@ -102,6 +102,10 @@ def load_review_protocol() -> tuple[
     dict[str, str],
     list[dict[str, object]],
 ]:
+    """审核动作协议。文件缺失时降级为审核功能整体关闭，其余功能照常；
+    文件存在但内容不合法仍然响亮退出，避免带着坏协议改写审核卡。"""
+    if not REVIEW_PROTOCOL_FILE.exists():
+        return {}, {}, {}, []
     try:
         data = json.loads(REVIEW_PROTOCOL_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -159,9 +163,10 @@ def load_review_protocol() -> tuple[
 
 
 ACTION_LABELS, ACTION_ALIASES, ACTION_KEY_ALIASES, UI_ACTIONS = load_review_protocol()
+# 协议缺失（降级模式）时用一个永不匹配的分支占位，勾选解析自然全部落空
 _ACTION_LABEL_PATTERN = "|".join(
     sorted((re.escape(label) for label in ACTION_ALIASES), key=len, reverse=True)
-)
+) or r"(?!x)x"
 ACTION_PATTERN = re.compile(
     rf"^- \[(?P<checked>[ xX])\]\s+(?P<label>{_ACTION_LABEL_PATTERN})\s*$",
     flags=re.M,
@@ -866,6 +871,13 @@ def dashboard_payload() -> dict[str, object]:
         health_reasons.append(f"有 {len(decision_pending)} 张卡片等你判断")
     elif health == "unknown":
         health = "green"
+    if not ACTION_LABELS and pending:
+        # 降级模式：没有审核协议时卡片只读，提醒去 Obsidian 处理或补协议
+        if health == "green":
+            health = "yellow"
+        health_reasons.append(
+            f"审核协议未安装（review_protocol.json），{len(pending)} 张审核卡暂时只读"
+        )
 
     high_value = [card for card in decision_pending if int(card["score"]) >= 90]
     low_value = [
@@ -1026,6 +1038,10 @@ def search_notes(query: str, scope: str = "all", limit: int = 30) -> list[dict[s
 
 
 def choose_review_action(rel_path: str, action: str | None) -> dict[str, object]:
+    if not ACTION_LABELS:
+        raise ValueError(
+            f"审核功能未启用：缺少协议文件 {REVIEW_PROTOCOL_FILE}，补上后重启工作台"
+        )
     candidate = (VAULT / rel_path).resolve()
     review_root = REVIEW_DIR.resolve()
     if candidate.parent != review_root or candidate.suffix != ".md" or not candidate.exists():
@@ -1567,7 +1583,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         if parsed.path == "/api/healthz":
-            self.send_json({"ok": True, "vault": VAULT.name})
+            self.send_json(
+                {"ok": True, "vault": VAULT.name, "review_enabled": bool(ACTION_LABELS)}
+            )
             return
         if parsed.path == "/api/dashboard":
             self.send_json(dashboard_payload())
