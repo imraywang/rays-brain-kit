@@ -48,6 +48,11 @@ python3 50-系统/40-自动化/知识仪表盘/server.py               # 打开 
 两者兼容：本仓库 bootstrap 建的最小骨架能被 ray-obsidian 识别为兼容库并补齐模板；
 ray-obsidian 初始化的库也可以直接被本工作台和管线使用。只用其中一个也完全成立。
 
+如果你已经在用 Claude Code / Codex 这类 Agent，还有第三种进入方式：
+[rayskills-lab](https://github.com/imraywang/rayskills-lab) 里的 `ray-dashboard` skill
+携带本仓库工作台的资产副本，由 Agent 完成安装到已有知识库、诊断和升级。
+资产以本仓库为真源，随版本同步。
+
 ## 设计原则
 
 - **Markdown 是唯一真源**：没有数据库，没有双向同步问题，十年后文件还在。
