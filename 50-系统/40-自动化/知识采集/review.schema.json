@@ -14,7 +14,7 @@
           "reason", "summary", "core_claims", "evidence", "counterpoints",
           "connections", "writing_angles", "suggested_kind", "topics",
           "knowledge_value_score", "writing_value_score", "time_sensitivity",
-          "reader_value"
+          "reader_value", "knowledge_units", "entities"
         ],
         "properties": {
           "id": {"type": "string"},
@@ -53,7 +53,78 @@
           "connections": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
           "writing_angles": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
           "suggested_kind": {"type": "string", "enum": ["概念", "人物与组织", "问题", "观点", "案例", "方法", "无"]},
-          "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 6}
+          "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+          "knowledge_units": {
+            "type": "array",
+            "maxItems": 8,
+            "description": "一份来源中所有值得独立长期保存的知识单元；每个单元只讲一个概念、对象、问题、观点、案例或方法",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id", "title", "kind", "summary", "core_claims", "evidence",
+                "counterpoints", "connections", "people"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^K[1-8]$",
+                  "description": "同一份来源内稳定且唯一的编号，如 K1"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 4,
+                  "pattern": "[A-Za-z0-9一-龥]",
+                  "description": "直接表达这一个知识单元内容的标题"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": ["概念", "人物与组织", "问题", "观点", "案例", "方法"]
+                },
+                "summary": {"type": "string", "minLength": 10},
+                "core_claims": {
+                  "type": "array",
+                  "items": {"type": "string", "minLength": 4},
+                  "minItems": 1,
+                  "maxItems": 5
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {"type": "string", "minLength": 4},
+                  "minItems": 1,
+                  "maxItems": 5
+                },
+                "counterpoints": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+                "connections": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+                "people": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "maxItems": 8,
+                  "description": "与本单元直接有关、应建立对象档案链接的规范名称"
+                }
+              }
+            }
+          },
+          "entities": {
+            "type": "array",
+            "maxItems": 8,
+            "description": "来源中观点、决策、能力或案例值得进入长期知识的人物、组织、公司、产品或模型；不收录仅被顺带提及的名字",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "entity_type", "aliases", "description", "viewpoints"],
+              "properties": {
+                "name": {"type": "string"},
+                "entity_type": {
+                  "type": "string",
+                  "enum": ["人物", "组织", "公司", "产品", "模型"]
+                },
+                "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+                "description": {"type": "string"},
+                "viewpoints": {"type": "array", "items": {"type": "string"}, "maxItems": 6}
+              }
+            }
+          }
         }
       }
     }

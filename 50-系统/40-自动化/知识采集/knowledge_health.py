@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unicodedata
 from collections import Counter, defaultdict
@@ -14,8 +15,15 @@ from datetime import date, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from topic_map_candidates import (
+    refresh_topic_map_candidates,
+    theme_map_coverage_issues,
+)
+from map_digest import refresh_weekly_map_digest
+
 VAULT = Path(os.environ.get("RAYS_BRAIN", str(HERE.parents[2]))).resolve()
 SYSTEM_DIR = HERE
 REVIEW_PROTOCOL_FILE = HERE.parent / "review_protocol.json"
@@ -34,10 +42,17 @@ LEGACY_REVIEW_DIR = VAULT / "10-创作/10-灵感/10-待评估/存量知识复核
 CANDIDATE_DIR = VAULT / "10-创作/10-灵感/20-候选选题"
 TOPIC_RESERVE_DIR = VAULT / "10-创作/10-灵感/90-选题储备"
 WRITING_TASK_DIR = VAULT / "10-创作/20-写作任务"
+ARTICLE_DRAFT_DIR = VAULT / "10-创作/30-文章草稿"
+ORAL_DRAFT_DIR = VAULT / "10-创作/20-口播草稿"
 CONTENT_FEEDBACK_DIR = VAULT / "40-发布/00-内容反馈"
 X_DIR = VAULT / "30-资料/30-X书签"
 WEB_DIR = VAULT / "30-资料/40-网页剪藏"
 KNOWLEDGE_DIR = VAULT / "20-知识"
+TOPIC_MAP_CANDIDATE_STATE = STATE_HOME / "topic-map-candidates.json"
+TOPIC_MAP_CANDIDATE_NOTE = VAULT / "00-入口/10-工作台/主题地图候选.md"
+MAP_DIGEST_STATE = STATE_HOME / "map-digest.json"
+MAP_DIGEST_NOTE_REL = Path("00-入口/10-工作台/知识地图整理.md")
+MAP_DIGEST_WEEKLY_DIR_REL = Path("00-入口/20-日报/知识地图整理")
 LINK_INBOX = VAULT / "30-资料/00-待抓取/链接收件箱.md"
 INGEST_LABEL = "com.ray.knowledge-ingest"
 AUTOMATION_LABELS = {
@@ -45,6 +60,7 @@ AUTOMATION_LABELS = {
     "health_daily": ("每日健康检查", "com.ray.knowledge-health-daily"),
     "health_weekly": ("每周健康检查", "com.ray.knowledge-health-weekly"),
     "content_snapshot": ("内容快照", "com.ray.content-snapshot"),
+    "feedback_snapshot": ("反馈复盘快照", "com.ray.feedback-snapshot"),
 }
 DEFAULT_DAILY_REPORT_KEEP_DAYS = 7
 DEFAULT_WEEKLY_REPORT_KEEP_WEEKS = 8
@@ -59,8 +75,15 @@ REQUIRED_FILES = [
     "50-系统/40-自动化/review_protocol.json",
     "50-系统/40-自动化/内容快照/content_snapshot.py",
     "20-知识/README.md",
+    "20-知识/20-人物与组织/README.md",
+    "20-知识/25-产品与模型/README.md",
+    "20-知识/70-知识地图/人物与思想索引.md",
+    "20-知识/70-知识地图/产品与模型索引.md",
     "50-系统/40-自动化/知识采集/knowledge_ingest.py",
+    "50-系统/40-自动化/知识采集/map_digest.py",
+    "50-系统/40-自动化/知识采集/topic_map_candidates.py",
     "50-系统/40-自动化/知识采集/config.json",
+    "50-系统/40-自动化/知识采集/entity_registry.json",
 ]
 
 
@@ -90,6 +113,20 @@ def load_review_protocol() -> tuple[dict[str, str], dict[str, str]]:
 
 
 REVIEW_ACTION_LABELS, REVIEW_ACTION_ALIASES = load_review_protocol()
+
+
+def load_topic_attention_days() -> int:
+    try:
+        data = json.loads(REVIEW_PROTOCOL_FILE.read_text(encoding="utf-8"))
+        days = int(data.get("topic_attention", {}).get("candidate_days", 7))
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"无法读取候选注意力期限：{REVIEW_PROTOCOL_FILE}（{exc}）") from exc
+    if not 1 <= days <= 30:
+        raise RuntimeError("候选注意力期限必须在 1–30 天之间")
+    return days
+
+
+TOPIC_ATTENTION_DAYS = load_topic_attention_days()
 _REVIEW_ACTION_PATTERN = re.compile(
     r"^- \[[xX]\]\s+("
     + "|".join(
@@ -161,8 +198,27 @@ def move_report_to_archive(source: Path, archive_dir: Path) -> Path:
     while target.exists():
         target = archive_dir / f"{source.stem}-{suffix}{source.suffix}"
         suffix += 1
+    old_target = source.relative_to(VAULT).with_suffix("").as_posix()
     source.replace(target)
+    new_target = target.relative_to(VAULT).with_suffix("").as_posix()
+    rewrite_wikilink_target(old_target, new_target)
     return target
+
+
+def rewrite_wikilink_target(old_target: str, new_target: str) -> int:
+    """报告移动后同步更新精确指向它的 Obsidian 链接。"""
+    pattern = re.compile(
+        rf"(?<=\[\[){re.escape(old_target)}(?=(?:[|#]|\]\]))"
+    )
+    updated_files = 0
+    for path in VAULT.rglob("*.md"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        updated = pattern.sub(new_target, text)
+        if updated == text:
+            continue
+        path.write_text(updated, encoding="utf-8")
+        updated_files += 1
+    return updated_files
 
 
 def archive_report_history(
@@ -214,11 +270,32 @@ def archive_report_history(
         )
         archived_weekly.append(target.relative_to(VAULT).as_posix())
 
+    archived_map_digest_weekly: list[str] = []
+    map_digest_weekly_dir = VAULT / MAP_DIGEST_WEEKLY_DIR_REL
+    for path in sorted(map_digest_weekly_dir.glob("*.md")):
+        match = WEEKLY_REPORT_NAME.fullmatch(path.name)
+        if not match:
+            continue
+        try:
+            week_start = date.fromisocalendar(
+                int(match.group("year")), int(match.group("week")), 1
+            )
+        except ValueError:
+            continue
+        if week_start >= weekly_first_kept:
+            continue
+        target = move_report_to_archive(
+            path,
+            REPORT_ARCHIVE_DIR / "知识地图整理" / match.group("year"),
+        )
+        archived_map_digest_weekly.append(target.relative_to(VAULT).as_posix())
+
     return {
         "daily_keep_days": daily_keep_days,
         "weekly_keep_weeks": weekly_keep_weeks,
         "daily_archived": archived_daily,
         "weekly_archived": archived_weekly,
+        "map_digest_weekly_archived": archived_map_digest_weekly,
     }
 
 
@@ -372,6 +449,98 @@ def knowledge_link_issues() -> list[dict[str, Any]]:
     return issues
 
 
+def entity_identity_issues() -> list[dict[str, str]]:
+    roots = {
+        "20-人物与组织": {"人物", "组织", "公司"},
+        "25-产品与模型": {"产品", "模型"},
+    }
+    records: list[dict[str, Any]] = []
+    issues: list[dict[str, str]] = []
+
+    def key(value: str) -> str:
+        value = unicodedata.normalize("NFKC", value).casefold()
+        return re.sub(r"[\s·•._\-—–，,。:：'\"()（）/@]+", "", value)
+
+    def family(entity_type: str) -> str:
+        if entity_type == "人物":
+            return "person"
+        if entity_type in {"组织", "公司"}:
+            return "organization"
+        if entity_type in {"产品", "模型"}:
+            return "offering"
+        return "invalid"
+
+    for folder, allowed_types in roots.items():
+        root = KNOWLEDGE_DIR / folder
+        if not root.exists():
+            continue
+        for path in root.glob("*.md"):
+            if path.name == "README.md":
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            meta = parse_frontmatter(text)
+            rel_path = path.relative_to(VAULT).as_posix()
+            entity_type = meta.get("entity_type", "").strip().strip('"')
+            entity_id = meta.get("entity_id", "").strip().strip('"')
+            if entity_type not in allowed_types:
+                issues.append(
+                    {
+                        "file": rel_path,
+                        "issue": f"类型 {entity_type or '缺失'} 与目录 {folder} 不一致",
+                    }
+                )
+            if not entity_id:
+                issues.append({"file": rel_path, "issue": "缺少稳定身份"})
+            try:
+                aliases = json.loads(meta.get("aliases", "[]"))
+            except (TypeError, json.JSONDecodeError):
+                aliases = []
+            if not isinstance(aliases, list):
+                aliases = []
+            records.append(
+                {
+                    "file": rel_path,
+                    "name": path.stem,
+                    "entity_id": entity_id,
+                    "family": family(entity_type),
+                    "keys": {
+                        key(str(value))
+                        for value in [path.stem, *aliases]
+                        if key(str(value))
+                    },
+                }
+            )
+
+    ids: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    names: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record["entity_id"]:
+            ids[record["entity_id"]].append(record)
+        for name_key in record["keys"]:
+            names[(record["family"], name_key)].append(record)
+    for entity_id, matches in ids.items():
+        if len(matches) > 1:
+            issues.append(
+                {
+                    "file": "；".join(item["file"] for item in matches),
+                    "issue": f"稳定身份重复：{entity_id}",
+                }
+            )
+    seen_groups: set[tuple[str, ...]] = set()
+    for matches in names.values():
+        files = tuple(sorted({item["file"] for item in matches}))
+        if len(files) < 2 or files in seen_groups:
+            continue
+        seen_groups.add(files)
+        issues.append(
+            {
+                "file": "；".join(files),
+                "issue": "同类对象的名称或别名冲突",
+            }
+        )
+    return issues
+
+
 def frontmatter_block(text: str) -> str:
     if not text.startswith("---\n"):
         return ""
@@ -383,9 +552,18 @@ def declared_source_paths(text: str) -> list[str]:
     """Return local primary-source paths declared in frontmatter."""
     block = frontmatter_block(text)
     prefix = r"(?:10-创作|30-资料|40-发布)/"
-    paths = re.findall(rf'"({prefix}[^"]+)"', block)
-    paths += re.findall(rf"'({prefix}[^']+)'", block)
-    for line in block.splitlines():
+    meta = parse_frontmatter(text)
+    paths: list[str] = []
+    source_file = meta.get("source_file", "").strip()
+    if re.match(rf"^{prefix}", source_file):
+        paths.append(source_file)
+    remaining_lines = [
+        line for line in block.splitlines() if not line.startswith("source_file:")
+    ]
+    remaining = "\n".join(remaining_lines)
+    paths += re.findall(rf'"({prefix}[^"]+)"', remaining)
+    paths += re.findall(rf"'({prefix}[^']+)'", remaining)
+    for line in remaining_lines:
         if '"' in line or "'" in line:
             continue
         paths += re.findall(rf"({prefix}[^,\]]+)", line)
@@ -501,25 +679,43 @@ def topic_knowledge_reference_issues() -> list[dict[str, str]]:
             if meta.get("kind") != "topic-candidate":
                 continue
             knowledge_status = meta.get("knowledge_status", "").strip()
-            knowledge_file = meta.get("knowledge_file", "").strip().strip('"')
-            wiki_match = re.fullmatch(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]", knowledge_file)
-            if wiki_match:
-                knowledge_file = wiki_match.group(1)
-            if knowledge_file and not Path(knowledge_file).suffix:
-                knowledge_file += ".md"
             if knowledge_status != "extracted":
                 continue
-            if not knowledge_file:
+            knowledge_files: list[str] = []
+            raw_files = meta.get("knowledge_files_json", "")
+            if raw_files:
+                try:
+                    parsed_files = json.loads(raw_files)
+                except json.JSONDecodeError:
+                    parsed_files = []
+                if isinstance(parsed_files, list):
+                    knowledge_files.extend(
+                        str(item).strip() for item in parsed_files if str(item).strip()
+                    )
+            legacy_file = meta.get("knowledge_file", "").strip().strip('"')
+            if legacy_file and legacy_file not in knowledge_files:
+                knowledge_files.insert(0, legacy_file)
+            if not knowledge_files:
                 issues.append({
                     "file": path.relative_to(VAULT).as_posix(),
                     "issue": "标记为已沉淀，但没有 knowledge_file",
                 })
-            elif knowledge_file.startswith("90-归档/90-待清理/"):
-                issues.append({
-                    "file": path.relative_to(VAULT).as_posix(),
-                    "issue": "knowledge_file 指向待清理区",
-                })
-            else:
+                continue
+            for raw_file in knowledge_files:
+                knowledge_file = raw_file
+                wiki_match = re.fullmatch(
+                    r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]", knowledge_file
+                )
+                if wiki_match:
+                    knowledge_file = wiki_match.group(1)
+                if knowledge_file and not Path(knowledge_file).suffix:
+                    knowledge_file += ".md"
+                if knowledge_file.startswith("90-归档/90-待清理/"):
+                    issues.append({
+                        "file": path.relative_to(VAULT).as_posix(),
+                        "issue": f"knowledge_file 指向待清理区：{knowledge_file}",
+                    })
+                    continue
                 knowledge_path = VAULT / knowledge_file
                 try:
                     in_knowledge = (
@@ -577,27 +773,7 @@ def topic_knowledge_reference_issues() -> list[dict[str, str]]:
 
 
 def knowledge_map_coverage_issues() -> list[dict[str, str]]:
-    notes: list[Path] = []
-    maps: list[str] = []
-    for path in KNOWLEDGE_DIR.rglob("*.md"):
-        if path.name == "README.md" or "90-元数据" in path.parts:
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if parse_frontmatter(text).get("kind") == "map":
-            maps.append(text)
-        else:
-            notes.append(path)
-    linked_targets = {
-        raw.split("|", 1)[0].split("#", 1)[0].strip().removesuffix(".md")
-        for raw in re.findall(r"\[\[([^\]]+)\]\]", "\n".join(maps))
-    }
-    issues: list[dict[str, str]] = []
-    for path in notes:
-        rel_path = path.relative_to(VAULT).as_posix()
-        rel_note = rel_path[:-3]
-        if path.stem not in linked_targets and rel_note not in linked_targets:
-            issues.append({"file": rel_path, "issue": "没有进入任何知识地图"})
-    return issues
+    return theme_map_coverage_issues(VAULT)
 
 
 # 正式稿的两种形态：图文走 article-published，口播视频走 video-published。
@@ -665,6 +841,63 @@ def published_metadata_issues() -> list[dict[str, Any]]:
     return issues
 
 
+def published_active_residue_issues() -> list[dict[str, str]]:
+    """找出已经发布、却仍占在三个活跃生产目录里的文件。"""
+    active_roots = (WRITING_TASK_DIR, ARTICLE_DRAFT_DIR, ORAL_DRAFT_DIR)
+    found: dict[str, dict[str, str]] = {}
+
+    def active_file_from_link(value: str) -> Path | None:
+        match = re.match(r"\s*\[\[([^\]|#]+)", value or "")
+        if not match:
+            return None
+        raw = match.group(1).strip()
+        path = VAULT / (raw if raw.endswith(".md") else raw + ".md")
+        if path.is_file() and any(root in path.parents for root in active_roots):
+            return path
+        return None
+
+    # 正式稿反向指向活跃稿件，说明发布登记后没有完成移动。即使旧稿状态没来得及回写，
+    # 这条关系本身也足够确定，不能让它继续被工作台隐藏。
+    published_root = VAULT / "40-发布"
+    if published_root.exists():
+        for formal in published_root.rglob("*.md"):
+            if CONTENT_FEEDBACK_DIR in formal.parents:
+                continue
+            meta = parse_frontmatter(formal.read_text(encoding="utf-8", errors="replace"))
+            if meta.get("kind") not in PUBLISHED_KINDS:
+                continue
+            for key in ("draft_source", "oral_script", "content_pack"):
+                path = active_file_from_link(meta.get(key, ""))
+                if path is None:
+                    continue
+                relative_path = path.relative_to(VAULT).as_posix()
+                found[relative_path] = {
+                    "file": relative_path,
+                    "published_file": formal.relative_to(VAULT).as_posix(),
+                    "issue": "正式稿仍指向活跃生产目录",
+                }
+
+    # 再从活跃目录正向检查，覆盖更早的历史稿：它可能已经写了 published_file，
+    # 但正式稿还没补 draft_source/content_pack。
+    for root in active_roots:
+        for path in markdown_notes(root):
+            meta = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+            if normalized_status(meta) not in {"published", "已发布"} and not meta.get(
+                "published_file", ""
+            ).strip():
+                continue
+            relative_path = path.relative_to(VAULT).as_posix()
+            found.setdefault(
+                relative_path,
+                {
+                    "file": relative_path,
+                    "published_file": meta.get("published_file", ""),
+                    "issue": "已发布文件仍留在活跃生产目录",
+                },
+            )
+    return [found[key] for key in sorted(found)]
+
+
 def has_topic_freshness_anchor(meta: dict[str, str]) -> bool:
     return bool(
         meta.get("source_published_at", "").strip()
@@ -675,13 +908,36 @@ def has_topic_freshness_anchor(meta: dict[str, str]) -> bool:
     )
 
 
-def topic_is_fresh(meta: dict[str, str], now: datetime) -> bool:
+def topic_source_is_fresh(meta: dict[str, str], now: datetime) -> bool:
     fresh_until = deadline_value(meta, ("fresh_until",), now)
     return bool(
         has_topic_freshness_anchor(meta)
         and meta.get("freshness_status", "").strip().lower() == "fresh"
         and fresh_until
         and fresh_until >= now
+    )
+
+
+def topic_attention_until(meta: dict[str, str]) -> date | None:
+    raw_until = meta.get("attention_until", "").strip().strip('"')
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_until):
+        return date.fromisoformat(raw_until)
+    entered = parse_dt(
+        meta.get("attention_entered_at", "")
+        or meta.get("created_at", "")
+        or meta.get("last_progress_at", "")
+    )
+    if not entered:
+        return None
+    return entered.date() + timedelta(days=TOPIC_ATTENTION_DAYS)
+
+
+def topic_attention_is_fresh(meta: dict[str, str], now: datetime) -> bool:
+    attention_until = topic_attention_until(meta)
+    return bool(
+        attention_until
+        and meta.get("attention_status", "fresh").strip().lower() != "expired"
+        and now.date() < attention_until
     )
 
 
@@ -713,7 +969,7 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
                 "status": status,
             })
         if status == "partially-published":
-            if topic_is_fresh(meta, now):
+            if topic_source_is_fresh(meta, now):
                 continuations += 1
             else:
                 needs_refresh_candidates.append({
@@ -724,42 +980,26 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
             continue
         if status != "candidate":
             continue
-        expiry = deadline_value(
-            meta,
-            ("expires_at", "expires_on", "valid_until", "expiry_date", "fresh_until"),
-            now,
-        )
-        review_after = deadline_value(meta, ("review_after",), now)
         freshness_status = meta.get("freshness_status", "").strip().lower()
-        explicitly_expired = (
-            status in {"expired", "已过期", "失效"}
-            or freshness_status == "stale"
-            or bool(expiry and expiry < now)
-        )
         age_days = note_age_days(path, meta, now)
         item = {
             "file": path.relative_to(VAULT).as_posix(),
             "age_days": round(age_days, 1),
         }
-        if explicitly_expired:
+        attention_fresh = topic_attention_is_fresh(meta, now)
+        if not attention_fresh:
             expired_candidates.append(item)
-            if meta.get("fresh_until", "").strip():
+        if not has_topic_freshness_anchor(meta) or not meta.get("fresh_until", "").strip():
+            source_date_missing_candidates.append(item)
+        if attention_fresh:
+            active_candidates += 1
+            source_expiry = deadline_value(meta, ("fresh_until",), now)
+            if freshness_status == "stale" or bool(source_expiry and source_expiry < now):
                 source_stale_candidates.append({
                     **item,
                     "source_published_at": meta.get("source_published_at", ""),
                     "fresh_until": meta.get("fresh_until", ""),
                 })
-        if not has_topic_freshness_anchor(meta) or not meta.get("fresh_until", "").strip():
-            source_date_missing_candidates.append(item)
-        if topic_is_fresh(meta, now):
-            active_candidates += 1
-            if review_after and review_after < now:
-                review_overdue_candidates.append({
-                    **item,
-                    "review_after": review_after.date().isoformat(),
-                })
-            if age_days > 14:
-                stale_candidates.append(item)
 
     reserve_candidates = 0
     for path in markdown_notes(TOPIC_RESERVE_DIR):
@@ -831,12 +1071,20 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
             })
 
     underlinked_knowledge = knowledge_link_issues()
+    entity_issues = entity_identity_issues()
     provenance_issues = knowledge_provenance_issues()
     backfill_issues = knowledge_backfill_issues()
     handoff_issues = writing_knowledge_handoff_issues()
     topic_knowledge_issues = topic_knowledge_reference_issues()
+    topic_map_state = refresh_topic_map_candidates(
+        VAULT,
+        TOPIC_MAP_CANDIDATE_STATE,
+        TOPIC_MAP_CANDIDATE_NOTE,
+        now=now,
+    )
     map_coverage_issues = knowledge_map_coverage_issues()
     publication_metadata = published_metadata_issues()
+    publication_residue = published_active_residue_issues()
     overdue_candidates = {
         item["file"]: item
         for item in expired_candidates + review_overdue_candidates + stale_candidates
@@ -870,6 +1118,8 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
         "processed_reviews_in_active": processed_reviews_in_active,
         "underlinked_knowledge_count": len(underlinked_knowledge),
         "underlinked_knowledge": underlinked_knowledge,
+        "entity_identity_issue_count": len(entity_issues),
+        "entity_identity_issues": entity_issues,
         "knowledge_provenance_issue_count": len(provenance_issues),
         "knowledge_provenance_issues": provenance_issues,
         "knowledge_backfill_issue_count": len(backfill_issues),
@@ -880,20 +1130,27 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
         "topic_knowledge_reference_issues": topic_knowledge_issues,
         "knowledge_map_coverage_issue_count": len(map_coverage_issues),
         "knowledge_map_coverage_issues": map_coverage_issues,
+        "topic_map_candidate_count": len(topic_map_state.get("candidates", [])),
+        "topic_map_candidates": topic_map_state.get("candidates", []),
+        "topic_map_observing_count": len(topic_map_state.get("observing", [])),
+        "topic_map_observing": topic_map_state.get("observing", []),
+        "topic_map_summary": topic_map_state.get("summary", {}),
         "published_metadata_issue_count": len(publication_metadata),
         "published_metadata_issues": publication_metadata,
+        "published_active_residue_count": len(publication_residue),
+        "published_active_residue_issues": publication_residue,
     }
 
 
 def creation_alerts(metrics: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
-    if metrics["active_candidate_count"] > 12:
+    if metrics["active_candidate_count"] > 7:
         reasons.append(
-            f"今日候选有 {metrics['active_candidate_count']} 条，超过 12 条上限"
+            f"今日候选有 {metrics['active_candidate_count']} 条，超过 7 条上限"
         )
     if metrics["stale_candidate_count"]:
         reasons.append(
-            f"有 {metrics['stale_candidate_count']} 条候选超过 14 天未推进"
+            f"有 {metrics['stale_candidate_count']} 条候选超过 {TOPIC_ATTENTION_DAYS} 天未推进"
         )
     if metrics.get("source_stale_candidate_count", 0):
         reasons.append(
@@ -941,17 +1198,25 @@ def creation_alerts(metrics: dict[str, Any]) -> list[str]:
         reasons.append(
             f"有 {metrics['underlinked_knowledge_count']} 篇长期知识少于 2 条有效连接"
         )
+    if metrics.get("entity_identity_issue_count", 0):
+        reasons.append(
+            f"有 {metrics['entity_identity_issue_count']} 个对象档案存在重复、错位或身份缺失"
+        )
     if metrics.get("topic_knowledge_reference_issue_count", 0):
         reasons.append(
             f"有 {metrics['topic_knowledge_reference_issue_count']} 条候选的知识去向失效"
         )
     if metrics.get("knowledge_map_coverage_issue_count", 0):
         reasons.append(
-            f"有 {metrics['knowledge_map_coverage_issue_count']} 篇长期知识尚未进入知识地图"
+            f"有 {metrics['knowledge_map_coverage_issue_count']} 篇长期知识尚未进入真正的主题地图"
         )
     if metrics.get("published_metadata_issue_count", 0):
         reasons.append(
             f"有 {metrics['published_metadata_issue_count']} 篇已发布内容缺少平台公开信息"
+        )
+    if metrics.get("published_active_residue_count", 0):
+        reasons.append(
+            f"有 {metrics['published_active_residue_count']} 个已发布文件仍留在草稿或写作任务区"
         )
     return reasons
 
@@ -980,6 +1245,34 @@ def launch_status(label: str = INGEST_LABEL) -> dict[str, Any]:
         "last_exit_code": int(exit_code.group(1)) if exit_code else None,
         "interval_seconds": int(interval.group(1)) if interval else None,
     }
+
+
+def source_health_findings(
+    state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    source_health = state.get("source_health", {})
+    degraded_sources = [
+        {
+            "source": str(key),
+            "label": str(value.get("label", key)),
+            "consecutive_failures": int(value.get("consecutive_failures", 0) or 0),
+            "last_failure_at": str(value.get("last_failure_at", "")),
+            "message": str(value.get("message", "")),
+        }
+        for key, value in source_health.items()
+        if isinstance(value, dict) and value.get("status") == "degraded"
+    ]
+    red: list[str] = []
+    yellow: list[str] = []
+    for source in degraded_sources:
+        reason = (
+            f"{source['label']}已连续 {source['consecutive_failures']} 轮读取失败"
+        )
+        if source["consecutive_failures"] >= 3:
+            red.append(reason)
+        else:
+            yellow.append(reason)
+    return degraded_sources, red, yellow
 
 
 def process_is_running(pid: int) -> bool:
@@ -1309,6 +1602,10 @@ def collect_metrics() -> dict[str, Any]:
     checked_links, broken_links, links_to_cleanup = resolve_wikilinks()
     missing_required = [rel for rel in REQUIRED_FILES if not (VAULT / rel).exists()]
     unresolved_errors = [error for error in state.get("errors", []) if not error.get("resolved_at")]
+    source_health = state.get("source_health", {})
+    degraded_sources, source_red_reasons, source_yellow_reasons = (
+        source_health_findings(state)
+    )
     state_age = safe_age_hours(state.get("updated_at", ""), now)
     automation_jobs = {
         key: {
@@ -1339,6 +1636,8 @@ def collect_metrics() -> dict[str, Any]:
         yellow_reasons.append(f"采集状态已 {state_age:.1f} 小时没有更新")
     if unresolved_errors:
         red_reasons.append(f"存在 {len(unresolved_errors)} 个未解决错误")
+    red_reasons.extend(source_red_reasons)
+    yellow_reasons.extend(source_yellow_reasons)
     if failed_articles or failed_web:
         red_reasons.append(f"存在 {len(failed_articles) + len(failed_web)} 条正文抓取失败")
     if icloud == "syncing":
@@ -1411,6 +1710,8 @@ def collect_metrics() -> dict[str, Any]:
         "failed_articles": failed_articles,
         "failed_web": failed_web,
         "unresolved_errors": unresolved_errors[-10:],
+        "source_health": source_health,
+        "degraded_sources": degraded_sources,
         "links_checked": checked_links,
         "broken_link_count": len(broken_links),
         "broken_links": broken_links[:20],
@@ -1510,24 +1811,56 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "",
         "| 检查项 | 数量 | 说明 |",
         "|---|---:|---|",
-        f"| 今日可选 | {metrics.get('fresh_candidate_count', metrics.get('active_candidate_count', 0))} | 原始资料仍在有效期内 |",
+        f"| 今日可选 | {metrics.get('fresh_candidate_count', metrics.get('active_candidate_count', 0))} | 进入候选池未满 {TOPIC_ATTENTION_DAYS} 天 |",
         f"| 可续写 | {metrics.get('continuation_count', 0)} | 已发布但还有明确剩余角度 |",
         f"| 选题储备 | {metrics.get('reserve_candidate_count', 0)} | 有价值但近期不写 |",
         f"| 待新信号唤醒 | {metrics.get('needs_refresh_candidate_count', 0)} | 需要新进展或本人新实践才能回到今日候选 |",
         f"| 新鲜度资料不全 | {metrics.get('topic_freshness_missing_count', 0)} | 候选、续写和储备都应保留原始资料日期与有效期 |",
-        f"| 过期或超期候选 | {metrics.get('overdue_candidate_count', 0)} | 已失效、到复查日或超过 14 天未推进 |",
+        f"| 过期或超期候选 | {metrics.get('overdue_candidate_count', 0)} | 进入候选池已满 {TOPIC_ATTENTION_DAYS} 天仍未立项 |",
         f"| 活跃写作任务 | {metrics.get('active_writing_task_count', 0)} | 建议同时不超过 4 个 |",
         f"| 待反馈 | {metrics.get('pending_feedback_count', 0)} | 等待发布后复盘 |",
         f"| 已到期未复盘 | {metrics.get('overdue_feedback_count', 0)} | 应优先补齐反馈 |",
         f"| 活跃审核目录中的已处理卡 | {metrics.get('processed_review_in_active_count', 0)} | 应退出活跃入口 |",
+        f"| 对象重复、错位或身份缺失 | {metrics.get('entity_identity_issue_count', 0)} | 人物、组织、产品和模型应各有唯一稳定档案 |",
         f"| 少于 2 条知识连接 | {metrics.get('underlinked_knowledge_count', 0)} | 长期知识缺少足够内部连接 |",
         f"| 来源缺失或失效 | {metrics.get('knowledge_provenance_issue_count', 0)} | 长期知识必须能回到原始资料 |",
         f"| 发布回写不一致 | {metrics.get('knowledge_backfill_issue_count', 0)} | 已标记回写却没有知识引用 |",
         f"| 写作知识漏接 | {metrics.get('writing_knowledge_handoff_issue_count', 0)} | 写作任务应继承候选中的可调用知识 |",
         f"| 候选知识去向失效 | {metrics.get('topic_knowledge_reference_issue_count', 0)} | 已沉淀候选必须指向活跃知识 |",
-        f"| 未进入知识地图 | {metrics.get('knowledge_map_coverage_issue_count', 0)} | 长期知识应至少进入一张主题地图 |",
+        f"| 主题地图候选 | {metrics.get('topic_map_candidate_count', 0)} | 只提醒，不自动建图 |",
+        f"| 观察中的主题 | {metrics.get('topic_map_observing_count', 0)} | 等待更多来源或知识增长 |",
+        f"| 未进入主题地图 | {metrics.get('knowledge_map_coverage_issue_count', 0)} | 对象索引和总目录不计入主题覆盖 |",
         f"| 发布信息待补 | {metrics.get('published_metadata_issue_count', 0)} | 已发布平台的公开链接与时间应可追溯 |",
+        f"| 发布后未收尾 | {metrics.get('published_active_residue_count', 0)} | 已发布的母稿、口播稿和成稿包应退出活跃目录 |",
         "",
+        "## 主题地图候选",
+        "",
+    ]
+    topic_map_candidates = metrics.get("topic_map_candidates", [])
+    if topic_map_candidates:
+        for candidate in topic_map_candidates[:5]:
+            lines.extend(
+                [
+                    f"### {candidate['name']}",
+                    "",
+                    f"- 建议：{candidate['proposal']}；置信度 {candidate['confidence']}",
+                    f"- 证据：{candidate['note_count']} 条知识，{candidate['source_count']} 份独立来源",
+                    f"- 原因：{candidate['reason']}",
+                    f"- 判断入口：[[00-入口/10-工作台/主题地图候选#{candidate['name']}|打开主题地图候选]]",
+                    "",
+                ]
+            )
+        if len(topic_map_candidates) > 5:
+            lines.extend(
+                [
+                    f"- 另有 {len(topic_map_candidates) - 5} 个候选，"
+                    "[[00-入口/10-工作台/主题地图候选|打开完整候选列表]]。",
+                    "",
+                ]
+            )
+    else:
+        lines.extend(["- 当前没有达到人工判断门槛的主题。", ""])
+    lines.extend([
         "## 运行健康",
         "",
         "| 检查项 | 结果 |",
@@ -1540,6 +1873,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         f"| iCloud | {fmt_icloud(metrics['icloud'])} |",
         f"| 正文抓取失败 | {len(metrics['failed_articles']) + len(metrics['failed_web'])} |",
         f"| 未解决错误 | {len(metrics['unresolved_errors'])} |",
+        f"| 异常来源 | {len(metrics.get('degraded_sources', []))} |",
         f"| 内部链接 | 检查 {metrics['links_checked']} 个，异常 {metrics.get('broken_link_count', len(metrics['broken_links']))} 个 |",
         f"| 只指向待清理区 | {metrics.get('links_to_cleanup_count', 0)} 个 |",
         f"| 重复 X 书签 | {len(metrics['duplicate_x_ids'])} 组 |",
@@ -1549,7 +1883,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "",
         "## 建议优先处理",
         "",
-    ]
+    ])
     if metrics["top_pending"]:
         for item in metrics["top_pending"][:3]:
             note = item["file"][:-3]
@@ -1564,13 +1898,15 @@ def daily_report(metrics: dict[str, Any]) -> str:
         ("新鲜度资料不全", metrics.get("topic_freshness_missing", [])),
         ("到期未复盘", metrics.get("overdue_feedback", [])),
         ("活跃审核目录中的已处理卡", metrics.get("processed_reviews_in_active", [])),
+        ("对象档案异常", metrics.get("entity_identity_issues", [])),
         ("连接不足的长期知识", metrics.get("underlinked_knowledge", [])),
         ("来源缺失或失效的长期知识", metrics.get("knowledge_provenance_issues", [])),
         ("发布回写状态不一致", metrics.get("knowledge_backfill_issues", [])),
         ("写作任务知识漏接", metrics.get("writing_knowledge_handoff_issues", [])),
         ("候选知识去向失效", metrics.get("topic_knowledge_reference_issues", [])),
-        ("未进入知识地图", metrics.get("knowledge_map_coverage_issues", [])),
+        ("未进入主题地图", metrics.get("knowledge_map_coverage_issues", [])),
         ("发布信息待补", metrics.get("published_metadata_issues", [])),
+        ("发布后未收尾", metrics.get("published_active_residue_issues", [])),
     )
     details = [(title, items) for title, items in detail_groups if items]
     if details:
@@ -1578,9 +1914,13 @@ def daily_report(metrics: dict[str, Any]) -> str:
         for title, items in details:
             lines.extend([f"### {title}", ""])
             for item in items[:5]:
-                note = str(item["file"])
-                note = note[:-3] if note.endswith(".md") else note
-                lines.append(f"- [[{note}]]")
+                notes = []
+                for raw_note in str(item["file"]).split("；"):
+                    note = raw_note.strip()
+                    note = note[:-3] if note.endswith(".md") else note
+                    if note:
+                        notes.append(f"[[{note}]]")
+                lines.append(f"- {'；'.join(notes)}")
             if len(items) > 5:
                 lines.append(f"- 另有 {len(items) - 5} 条，请在对应工作台查看。")
             lines.append("")
@@ -1590,9 +1930,9 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "- 新增长期知识：相较上一份日报，`20-知识` 新出现的笔记。首次运行只建立基线。",
         "- 待系统提炼：采集完成但还没有审核卡。",
         "- 待人工审核：AI 已完成提炼，但仍需你决定是否保留、写作或清理。",
-        "- 今日可选：原始资料日期可追溯且仍在有效期内的候选；关闭、停放、归档和过期项目不计入。",
+        f"- 今日可选：进入候选池未满 {TOPIC_ATTENTION_DAYS} 天、且尚未立项的选题；资料时效另行提醒。",
         "- 新鲜度资料不全：候选、续写和储备中缺少原始资料日期、有效期或新鲜度状态的项目。",
-        "- 过期或超期候选：已标记过期、超过复查日期，或超过 14 天没有推进的候选，重复项只计一次。",
+        f"- 过期或超期候选：进入候选池已满 {TOPIC_ATTENTION_DAYS} 天仍未立项的选题，系统会关闭候选但保留资料与知识。",
         "- 待反馈：尚未标记完成的发布反馈；“已到期未复盘”是其中超过约定复盘日期的部分。",
         "- 活跃审核目录中的已处理卡：已执行分流但仍留在活跃审核入口的卡片。",
         "- 少于 2 条知识连接：长期知识正文中指向其他长期知识的有效内部链接不足 2 条。",
@@ -1600,8 +1940,10 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "- 发布回写不一致：发布稿标记为已经回写知识，但没有任何有效长期知识引用该发布稿。",
         "- 写作知识漏接：候选中已列出的可调用知识，没有随选定角度进入当前写作任务。",
         "- 候选知识去向失效：候选标记为已沉淀，但对应知识为空、不存在或只在待清理区。",
-        "- 未进入知识地图：长期知识还没有被任何主题地图引用。",
+        "- 主题地图候选：多份来源和多条知识已经形成稳定聚集，但仍需人工确认边界；候选不会自动建图。",
+        "- 未进入主题地图：长期知识还没有被任何 `map_role: theme` 地图引用；人物索引、产品模型索引、综合入口和地图总目录都不计入。",
         "- 发布信息待补：已确认在某个平台发布，但准确发布时间或公开链接仍为空。",
+        "- 发布后未收尾：正式稿已经存在，但对应母稿、口播稿或成稿包仍留在活跃生产目录。",
         "- 属性 schema：`20-知识` 中 kind 不在枚举内或残留 type/created/updated/knowledge_type 旧字段的笔记数。",
         f"- 待清理超期：`90-归档/90-待清理` 中放置超过 {metrics.get('cleanup_retention_days', 90)} 天的目录，确认无误后可人工删除。",
         "",
@@ -1753,6 +2095,20 @@ def write_weekly() -> Path:
     week_start = (now.date() - timedelta(days=now.weekday())).isoformat()
     week_end = (now.date() + timedelta(days=6 - now.weekday())).isoformat()
     period = f"{week_start} 至 {week_end}"
+    digest_status = "success"
+    try:
+        digest_result = refresh_weekly_map_digest(
+            VAULT,
+            MAP_DIGEST_STATE,
+            VAULT / MAP_DIGEST_NOTE_REL,
+            VAULT / MAP_DIGEST_WEEKLY_DIR_REL,
+            TOPIC_MAP_CANDIDATE_STATE,
+            now=now,
+        )
+    except Exception as exc:
+        digest_status = "failed"
+        digest_result = {"summary": {}}
+        print(f"weekly map digest failed: {exc}")
     context = weekly_context()
     ai_status = "success"
     try:
@@ -1761,6 +2117,21 @@ def write_weekly() -> Path:
         ai_status = "fallback"
         body = fallback_weekly(context, period)
         print(f"weekly AI summary failed, fallback used: {exc}")
+    digest_summary = digest_result.get("summary", {})
+    if digest_status == "success":
+        digest_line = (
+            f"本周有 {digest_summary.get('maps_with_new_knowledge', 0)} 张地图需要整理，"
+            f"共 {digest_summary.get('new_knowledge_count', 0)} 条暂存知识；"
+            f"其中 {digest_summary.get('pending_action_count', 0)} 条已有可确认建议。"
+        )
+    else:
+        digest_line = "本周地图整理没有成功生成，请查看每周任务日志。"
+    body = (
+        body.rstrip()
+        + "\n\n## 知识地图整理\n\n"
+        + digest_line
+        + "\n\n- [[00-入口/10-工作台/知识地图整理|打开本周整理建议]]\n"
+    )
     frontmatter = "\n".join([
         "---",
         "kind: knowledge-health-weekly",
@@ -1769,6 +2140,7 @@ def write_weekly() -> Path:
         f"period_end: {week_end}",
         f"generated_at: {json.dumps(now.isoformat(timespec='seconds'), ensure_ascii=False)}",
         f"summary_mode: {ai_status}",
+        f"map_digest_status: {digest_status}",
         "---", "",
     ])
     WEEKLY_DIR.mkdir(parents=True, exist_ok=True)
@@ -1784,6 +2156,8 @@ def write_weekly() -> Path:
         "report": report_path.relative_to(VAULT).as_posix(),
         "summary_mode": ai_status,
         "days_included": len(context["days"]),
+        "map_digest_status": digest_status,
+        "map_digest": digest_summary,
         "report_retention": retention,
     }, ensure_ascii=False, indent=2))
     return report_path

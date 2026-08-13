@@ -13,13 +13,24 @@ const state = {
   pipelineErrors: [],
 };
 
-const EXPECTED_SCHEMA_VERSION = 6;
+const EXPECTED_SCHEMA_VERSION = 8;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 function reviewActions() {
   return state.data?.review_actions || [];
+}
+
+function reviewActionsFor(item) {
+  if (!item?.knowledge_auto_at) return reviewActions();
+  return reviewActions()
+    .filter((action) => action.key !== "topic")
+    .map((action) => {
+      if (action.key === "knowledge") return { ...action, ui_label: "只保留已有知识" };
+      if (action.key === "both") return { ...action, ui_label: "再加入候选选题" };
+      return action;
+    });
 }
 
 function actionName(key) {
@@ -159,6 +170,7 @@ function renderDashboard() {
   renderBoard();
   renderTrend();
   renderKnowledgeMix();
+  renderTopicMapCandidates();
   renderRecent();
 }
 
@@ -221,9 +233,10 @@ function renderRail() {
 
   const pipeline = d.pipeline || {};
   const errors = Number(pipeline.unresolved_errors || 0);
+  const degraded = Number(pipeline.degraded_sources || 0);
   const rows = [`
-    <a class="rail-sys link${errors ? " alert" : ""}" href="#" data-open-pipeline="1" title="打开采集管线面板${pipeline.pending ? `，待处理 ${pipeline.pending} 条` : ""}">
-      <span>⟳</span>采集 ${pipeline.last_activity ? escapeHtml(formatRecent(pipeline.last_activity)) : "未运行"}${errors ? ` · ${errors} 个错误` : ""}
+    <a class="rail-sys link${errors || degraded ? " alert" : ""}" href="#" data-open-pipeline="1" title="打开采集管线面板${pipeline.pending ? `，待处理 ${pipeline.pending} 条` : ""}">
+      <span>⟳</span>采集 ${pipeline.last_activity ? escapeHtml(formatRecent(pipeline.last_activity)) : "未运行"}${errors ? ` · ${errors} 个错误` : degraded ? ` · ${degraded} 路异常` : ""}
     </a>`];
   (d.reports || []).forEach((report) => rows.push(`
     <a class="rail-sys link" href="#" data-note-path="${escapeHtml(report.path)}"><span>📄</span>${escapeHtml(report.title)}</a>
@@ -262,7 +275,10 @@ function renderPipeline(counts) {
 
 function filteredReviews() {
   const reviews = state.data?.reviews || [];
-  if (state.reviewFilter === "priority") return reviews.filter((item) => item.score >= 90);
+  if (state.reviewFilter === "priority") {
+    const limit = Math.max(1, Number(state.data?.review_daily_limit) || 3);
+    return reviews.slice(0, limit);
+  }
   if (state.reviewFilter === "cleanup") return reviews.filter((item) => item.score < 65 || item.recommendation === "清理");
   return reviews;
 }
@@ -270,7 +286,7 @@ function filteredReviews() {
 function renderReview() {
   const cards = filteredReviews();
   if (state.reviewIndex >= cards.length) state.reviewIndex = Math.max(0, cards.length - 1);
-  $("#queue-title").textContent = state.reviewFilter === "priority" ? "高价值资料" : state.reviewFilter === "cleanup" ? "可快速清理" : "全部待判断";
+  $("#queue-title").textContent = state.reviewFilter === "priority" ? "今日优先" : state.reviewFilter === "cleanup" ? "可快速清理" : "全部待判断";
   $("#queue-progress").textContent = cards.length ? `${state.reviewIndex + 1} / ${cards.length}` : "0 / 0";
 
   if (!cards.length) {
@@ -291,6 +307,10 @@ function renderReview() {
       <span class="score" aria-label="相关度 ${item.score} 分">${item.score}</span>
       <span class="tag">${escapeHtml(item.recommendation)}</span>
       ${item.kind ? `<span class="tag">${escapeHtml(item.kind)}</span>` : ""}
+      ${Number(item.knowledge_unit_count) ? `<span class="tag">${Number(item.knowledge_unit_count)} 个知识单元</span>` : ""}
+      ${Number(item.entity_count) ? `<span class="tag">${Number(item.entity_count)} 个相关对象</span>` : ""}
+      ${item.knowledge_auto_at ? `<span class="tag">知识已自动保留</span>` : ""}
+      ${item.personal_context_status === "captured" ? `<span class="tag">含个人背景</span>` : ""}
       ${item.confidence ? `<span class="tag">置信度 ${escapeHtml(item.confidence)}</span>` : ""}
       ${valueProps(item).join("")}
     </div>
@@ -302,7 +322,7 @@ function renderReview() {
       ${source ? `<a class="text-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>` : ""}
     </div>
     <div class="review-actions" aria-label="选择处理方式">
-      ${reviewActions().map((action) => `
+      ${reviewActionsFor(item).map((action) => `
         <button class="decision-button ${actionClass(action.key)}" type="button"
           data-review-action="${escapeHtml(action.key)}">${escapeHtml(action.ui_label)}</button>
       `).join("")}
@@ -535,9 +555,10 @@ function bindBoardEvents() {
 
 function showActionMenu(x, y, path) {
   const menu = $("#action-menu");
+  const item = (state.data.reviews || []).find((card) => card.path === path);
   menu.innerHTML = `
     <p>这张卡怎么处理？</p>
-    ${reviewActions().map((action) => `<button type="button" data-menu-action="${escapeHtml(action.key)}">${escapeHtml(action.ui_label)}</button>`).join("")}
+    ${reviewActionsFor(item).map((action) => `<button type="button" data-menu-action="${escapeHtml(action.key)}">${escapeHtml(action.ui_label)}</button>`).join("")}
     <button type="button" class="cancel" data-menu-cancel>取消</button>`;
   menu.hidden = false;
   const rect = menu.getBoundingClientRect();
@@ -545,7 +566,6 @@ function showActionMenu(x, y, path) {
   menu.style.top = `${Math.max(12, Math.min(y, window.innerHeight - rect.height - 12))}px`;
   menu.querySelectorAll("[data-menu-action]").forEach((button) => button.addEventListener("click", () => {
     hideActionMenu();
-    const item = (state.data.reviews || []).find((card) => card.path === path);
     if (item) chooseAction(item, button.dataset.menuAction);
   }));
   menu.querySelector("[data-menu-cancel]").addEventListener("click", hideActionMenu);
@@ -596,7 +616,7 @@ function renderTrend() {
 
 function renderKnowledgeMix() {
   const labelMap = {
-    concept: "概念", entity: "人物组织", question: "问题", viewpoint: "观点",
+    concept: "概念", entity: "对象档案", question: "问题", viewpoint: "观点",
     case: "案例", playbook: "方法", map: "地图", guide: "指南", "未标记": "未标记",
   };
   const entries = Object.entries(state.data.knowledge_kinds || {}).sort((a, b) => b[1] - a[1]);
@@ -610,6 +630,96 @@ function renderKnowledgeMix() {
       <strong>${value}</strong>
     </div>
   `).join("");
+}
+
+function renderTopicMapCandidates() {
+  const candidates = state.data?.topic_map_candidates || [];
+  const observing = state.data?.topic_map_observing || [];
+  const summary = state.data?.topic_map_summary || {};
+  const summaryNode = $("#topic-map-candidate-summary");
+  summaryNode.textContent = candidates.length
+    ? `${candidates.length} 个待判断 · ${Number(summary.true_unmapped_count || 0)} 条尚无主题归属`
+    : observing.length
+      ? `${observing.length} 个观察中`
+      : "当前没有达到判断门槛的主题";
+  const container = $("#topic-map-candidates");
+  if (!candidates.length) {
+    container.innerHTML = `
+      <div class="topic-map-empty">
+        <strong>当前没有需要决定的新地图</strong>
+        <span>${observing.length ? `${observing.length} 个主题仍在积累证据。` : "新知识会继续沿现有地图生长。"}</span>
+      </div>`;
+    return;
+  }
+  container.innerHTML = candidates.map((candidate) => {
+    const support = (candidate.supporting_notes || []).slice(0, 4);
+    const approveLabel = candidate.proposal === "合并" ? "确认需要合并" : "建立地图";
+    return `
+      <article class="topic-map-card">
+        <div class="topic-map-card-head">
+          <span class="topic-map-proposal">${escapeHtml(candidate.proposal)}</span>
+          <span>${escapeHtml(candidate.confidence)}置信度</span>
+        </div>
+        <h4>${escapeHtml(candidate.name)}</h4>
+        <p>${escapeHtml(candidate.reason)}</p>
+        <div class="topic-map-evidence">
+          <span>${Number(candidate.note_count)} 条知识</span>
+          <span>${Number(candidate.source_count)} 份来源</span>
+          ${candidate.dominant_map ? `<span>来自 ${escapeHtml(candidate.dominant_map)}</span>` : ""}
+        </div>
+        <div class="topic-map-support">
+          ${support.map((item) => `<a href="#" data-note-path="${escapeHtml(item.path)}">${escapeHtml(item.title)}</a>`).join("")}
+        </div>
+        <div class="topic-map-actions">
+          <button type="button" class="primary-button" data-topic-map-action="approve" data-topic-map-id="${escapeHtml(candidate.id)}">${approveLabel}</button>
+          <button type="button" class="quiet-button" data-topic-map-action="watch" data-topic-map-id="${escapeHtml(candidate.id)}">观察 14 天</button>
+          <button type="button" class="quiet-button" data-topic-map-action="dismiss" data-topic-map-id="${escapeHtml(candidate.id)}">忽略</button>
+        </div>
+      </article>`;
+  }).join("");
+  $$("[data-topic-map-action]").forEach((button) => button.addEventListener("click", () => {
+    chooseTopicMapCandidate(button.dataset.topicMapId, button.dataset.topicMapAction, button);
+  }));
+}
+
+async function chooseTopicMapCandidate(candidateId, action, button) {
+  const candidate = (state.data?.topic_map_candidates || []).find((item) => item.id === candidateId);
+  if (!candidate) return;
+  if (action === "approve") {
+    const label = candidate.proposal === "合并" ? "确认合并建议" : "建立主题地图";
+    const ok = await workbenchConfirm(
+      candidate.proposal === "合并"
+        ? `确认“${candidate.name}”需要人工合并？系统不会删除原地图。`
+        : `确认建立“${candidate.name}”主题地图？`,
+      label,
+    );
+    if (!ok) return;
+  }
+  if (action === "dismiss") {
+    const ok = await workbenchConfirm(
+      `忽略“${candidate.name}”？只有知识或来源明显增长时它才会再次出现。`,
+      "确认忽略",
+    );
+    if (!ok) return;
+  }
+  const buttons = $$(`[data-topic-map-id="${CSS.escape(candidateId)}"]`);
+  buttons.forEach((item) => { item.disabled = true; });
+  try {
+    const result = await api("/api/topic-map-candidates/action", {
+      method: "POST",
+      body: JSON.stringify({ candidate_id: candidateId, action }),
+    });
+    state.data.topic_map_candidates = result.state?.candidates || [];
+    state.data.topic_map_observing = result.state?.observing || [];
+    state.data.topic_map_summary = result.state?.summary || {};
+    state.data.counts.topic_map_candidates = state.data.topic_map_candidates.length;
+    renderTopicMapCandidates();
+    showToast(result.message || "主题地图候选已更新");
+  } catch (error) {
+    showToast(error.message);
+    buttons.forEach((item) => { item.disabled = false; });
+    if (button) button.focus();
+  }
 }
 
 function renderRecent() {
@@ -673,7 +783,10 @@ function mdInline(text) {
 }
 
 function renderMarkdown(source, { skipTitle = "" } = {}) {
-  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  const lines = String(source || "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n");
   const html = [];
   let sawContent = false;
   let i = 0;
@@ -1085,6 +1198,7 @@ function renderPipelineDrawer(status) {
       <div class="ledger-item"><span>最近活动</span><strong>${escapeHtml(status.last_activity ? formatRecent(status.last_activity) : "未运行")}</strong></div>
       <div class="ledger-item"><span>待处理来源</span><strong>${Number(status.pending_sources) || 0}</strong></div>
       <div class="ledger-item"><span>未解决错误</span><strong>${state.pipelineErrors.length}</strong></div>
+      <div class="ledger-item"><span>异常来源</span><strong>${(status.degraded_sources || []).length}</strong></div>
     </div>
     <div class="pipe-run">
       <button class="primary-button slim" type="button" id="pipeline-run" ${running ? "disabled" : ""}>
@@ -1092,6 +1206,24 @@ function renderPipelineDrawer(status) {
       </button>
       <span>定时任务每 30 分钟也会跑一轮，通常不用手动</span>
     </div>`);
+  const sourceHealth = Object.values(status.source_health || {});
+  if (sourceHealth.length) {
+    blocks.push(`
+      <h3 class="pipe-heading">来源状态</h3>
+      <div class="pipe-sources">
+        ${sourceHealth.map((item) => {
+          const healthy = item.status === "healthy";
+          return `
+            <div class="pipe-source">
+              <div>
+                <strong>${escapeHtml(item.label || "未知来源")}</strong>
+                <small>${item.last_success_at ? `最近成功 ${escapeHtml(formatRecent(item.last_success_at))}` : "尚无成功记录"}</small>
+              </div>
+              <span class="pipe-source-status ${healthy ? "healthy" : "degraded"}">${healthy ? "正常" : "异常"}</span>
+            </div>`;
+        }).join("")}
+      </div>`);
+  }
   if (status.draft_run_running) {
     blocks.push(`
       <div class="pipe-draft-run">
@@ -1107,6 +1239,20 @@ function renderPipelineDrawer(status) {
           <div class="pipe-error">
             <div><small>${escapeHtml(item.at)}</small><p>${escapeHtml(item.message)}</p></div>
             <button class="ghost-button" type="button" data-resolve-error="${index}">已解决</button>
+          </div>`).join("")}
+      </div>`);
+  }
+  if ((status.degraded_sources || []).length) {
+    blocks.push(`
+      <h3 class="pipe-heading">异常来源</h3>
+      <div class="pipe-errors">
+        ${status.degraded_sources.map((item) => `
+          <div class="pipe-error">
+            <div>
+              <strong>${escapeHtml(item.label)}</strong>
+              <small>连续 ${Number(item.consecutive_failures) || 0} 轮失败 · ${escapeHtml(item.last_failure_at || "")}</small>
+              <p>${escapeHtml(item.message || "暂时无法读取")}</p>
+            </div>
           </div>`).join("")}
       </div>`);
   }
@@ -1563,9 +1709,9 @@ function bindEvents() {
       state.reviewIndex = Math.min(cards.length - 1, Math.max(0, state.reviewIndex + (key === "j" ? 1 : -1)));
       renderReview();
       syncNoteDrawerWithReview();
-    } else if (reviewActions().some((action) => String(action.shortcut) === key) && item) {
+    } else if (reviewActionsFor(item).some((action) => String(action.shortcut) === key) && item) {
       event.preventDefault();
-      const action = reviewActions().find((candidate) => String(candidate.shortcut) === key);
+      const action = reviewActionsFor(item).find((candidate) => String(candidate.shortcut) === key);
       chooseAction(item, action.key);
     } else if (key === "o" && item) {
       event.preventDefault();

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -25,18 +26,26 @@ class CreationHealthTests(unittest.TestCase):
                 "CANDIDATE_DIR",
                 "TOPIC_RESERVE_DIR",
                 "WRITING_TASK_DIR",
+                "ARTICLE_DRAFT_DIR",
+                "ORAL_DRAFT_DIR",
                 "CONTENT_FEEDBACK_DIR",
                 "REVIEW_DIR",
                 "KNOWLEDGE_DIR",
+                "TOPIC_MAP_CANDIDATE_STATE",
+                "TOPIC_MAP_CANDIDATE_NOTE",
             )
         }
         health.VAULT = Path(self.temp.name)
         health.CANDIDATE_DIR = health.VAULT / "10-创作/10-灵感/20-候选选题"
         health.TOPIC_RESERVE_DIR = health.VAULT / "10-创作/10-灵感/90-选题储备"
         health.WRITING_TASK_DIR = health.VAULT / "10-创作/20-写作任务"
+        health.ARTICLE_DRAFT_DIR = health.VAULT / "10-创作/30-文章草稿"
+        health.ORAL_DRAFT_DIR = health.VAULT / "10-创作/20-口播草稿"
         health.CONTENT_FEEDBACK_DIR = health.VAULT / "40-发布/00-内容反馈"
         health.REVIEW_DIR = health.VAULT / "10-创作/10-灵感/10-待评估/剪藏复核"
         health.KNOWLEDGE_DIR = health.VAULT / "20-知识"
+        health.TOPIC_MAP_CANDIDATE_STATE = health.VAULT / ".state/topic-map-candidates.json"
+        health.TOPIC_MAP_CANDIDATE_NOTE = health.VAULT / "00-入口/10-工作台/主题地图候选.md"
 
     def tearDown(self) -> None:
         for name, value in self.original_paths.items():
@@ -61,7 +70,10 @@ class CreationHealthTests(unittest.TestCase):
 kind: topic-candidate
 status: candidate
 last_progress_at: 2026-07-22T10:00:00-07:00
-review_after: 2026-08-01
+attention_entered_at: 2026-07-22T10:00:00-07:00
+attention_until: 2026-07-29
+attention_status: fresh
+review_after: 2026-07-29
 source_published_at: 2026-07-22
 fresh_until: 2026-08-01
 freshness_status: fresh
@@ -75,7 +87,10 @@ freshness_status: fresh
 kind: topic-candidate
 status: candidate
 last_progress_at: 2026-07-01T10:00:00-07:00
-review_after: 2026-08-01
+attention_entered_at: 2026-07-01T10:00:00-07:00
+attention_until: 2026-07-08
+attention_status: expired
+review_after: 2026-07-08
 source_published_at: 2026-07-22
 fresh_until: 2026-08-01
 freshness_status: fresh
@@ -89,7 +104,10 @@ freshness_status: fresh
 kind: topic-candidate
 status: candidate
 last_progress_at: 2026-07-22T10:00:00-07:00
-review_after: 2026-07-20
+attention_entered_at: 2026-07-22T10:00:00-07:00
+attention_until: 2026-07-29
+attention_status: fresh
+review_after: 2026-07-29
 source_published_at: 2026-07-19
 fresh_until: 2026-08-01
 freshness_status: fresh
@@ -103,6 +121,9 @@ freshness_status: fresh
 kind: topic-candidate
 status: candidate
 last_progress_at: 2026-07-22T10:00:00-07:00
+attention_entered_at: 2026-07-22T10:00:00-07:00
+attention_until: 2026-07-29
+attention_status: fresh
 valid_until: 2026-07-10
 source_published_at: 2026-06-26
 fresh_until: 2026-07-10
@@ -199,9 +220,9 @@ freshness_status: stale
         self.assertEqual(result["expired_candidate_count"], 1)
         self.assertEqual(result["source_stale_candidate_count"], 1)
         self.assertEqual(result["source_date_missing_candidate_count"], 0)
-        self.assertEqual(result["review_overdue_candidate_count"], 1)
-        self.assertEqual(result["stale_candidate_count"], 1)
-        self.assertEqual(result["overdue_candidate_count"], 3)
+        self.assertEqual(result["review_overdue_candidate_count"], 0)
+        self.assertEqual(result["stale_candidate_count"], 0)
+        self.assertEqual(result["overdue_candidate_count"], 1)
         self.assertEqual(result["active_writing_task_count"], 1)
         self.assertEqual(result["pending_feedback_count"], 2)
         self.assertEqual(result["overdue_feedback_count"], 1)
@@ -210,7 +231,7 @@ freshness_status: stale
 
     def test_creation_alert_thresholds_and_compatibility(self) -> None:
         metrics = {
-            "active_candidate_count": 13,
+            "active_candidate_count": 8,
             "stale_candidate_count": 2,
             "active_writing_task_count": 5,
             "overdue_feedback_count": 1,
@@ -220,20 +241,73 @@ freshness_status: stale
         reasons = health.creation_alerts(metrics)
 
         self.assertEqual(len(reasons), 5)
-        self.assertTrue(any("超过 12 条" in reason for reason in reasons))
-        self.assertTrue(any("超过 14 天" in reason for reason in reasons))
+        self.assertTrue(any("超过 7 条" in reason for reason in reasons))
+        self.assertTrue(any("超过 7 天" in reason for reason in reasons))
         self.assertTrue(any("超过 4 个" in reason for reason in reasons))
         self.assertTrue(any("到期反馈" in reason for reason in reasons))
         self.assertTrue(any("已处理卡" in reason for reason in reasons))
 
         at_limits = {
-            "active_candidate_count": 12,
+            "active_candidate_count": 7,
             "stale_candidate_count": 0,
             "active_writing_task_count": 4,
             "overdue_feedback_count": 0,
             "processed_review_in_active_count": 0,
         }
         self.assertEqual(health.creation_alerts(at_limits), [])
+
+    def test_published_files_left_in_active_dirs_are_reported(self) -> None:
+        self.write(
+            "40-发布/10-X长文/成稿.md",
+            self.note(
+                'kind: article-published\nstatus: published\n'
+                'draft_source: "[[10-创作/30-文章草稿/母稿]]"\n'
+                'content_pack: "[[10-创作/20-写作任务/任务]]"',
+                "成稿",
+            ),
+        )
+        self.write(
+            "10-创作/30-文章草稿/母稿.md",
+            self.note("kind: article-draft\nstatus: published", "母稿"),
+        )
+        self.write(
+            "10-创作/20-写作任务/任务.md",
+            self.note("kind: content-pack\nstatus: published", "任务"),
+        )
+        self.write(
+            "10-创作/20-口播草稿/旧口播.md",
+            self.note("kind: oral-script\nstatus: recorded", "口播"),
+        )
+        self.write(
+            "40-发布/50-口播视频/旧视频.md",
+            self.note(
+                'kind: video-published\nstatus: published\n'
+                'oral_script: "[[10-创作/20-口播草稿/旧口播]]"',
+                "正式视频逐字稿",
+            ),
+        )
+        self.write(
+            "10-创作/20-口播草稿/已录未发.md",
+            self.note("kind: oral-script\nstatus: recorded", "不应收尾"),
+        )
+
+        issues = health.published_active_residue_issues()
+
+        self.assertEqual(len(issues), 3)
+        files = {item["file"] for item in issues}
+        self.assertIn("10-创作/30-文章草稿/母稿.md", files)
+        self.assertIn("10-创作/20-写作任务/任务.md", files)
+        self.assertIn("10-创作/20-口播草稿/旧口播.md", files)
+        self.assertNotIn("10-创作/20-口播草稿/已录未发.md", files)
+        reasons = health.creation_alerts({
+            "active_candidate_count": 0,
+            "stale_candidate_count": 0,
+            "active_writing_task_count": 0,
+            "overdue_feedback_count": 0,
+            "processed_review_in_active_count": 0,
+            "published_active_residue_count": 3,
+        })
+        self.assertTrue(any("已发布文件仍留在" in reason for reason in reasons))
 
     def test_creation_alerts_flag_stale_or_missing_source_dates(self) -> None:
         metrics = {
@@ -307,6 +381,20 @@ freshness_status: stale
         self.assertEqual(len(handoff), 1)
         self.assertEqual(handoff[0]["missing"], ["有效知识"])
 
+    def test_provenance_accepts_escaped_quotes_in_source_filename(self) -> None:
+        source = '30-资料/Sam Altman "Startup".md'
+        self.write(source, self.note("kind: source\nstatus: captured", "原始资料"))
+        self.write(
+            "20-知识/带引号来源.md",
+            self.note(
+                "kind: viewpoint\nstatus: evergreen\n"
+                f"source_file: {json.dumps(source, ensure_ascii=False)}",
+                "正文",
+            ),
+        )
+
+        self.assertEqual(health.knowledge_provenance_issues(), [])
+
     def test_flags_links_that_only_resolve_to_cleanup(self) -> None:
         self.write(
             "10-创作/候选.md",
@@ -360,7 +448,10 @@ freshness_status: stale
         )
         self.write(
             "20-知识/70-知识地图/地图.md",
-            self.note("kind: map\nstatus: evergreen", "[[已覆盖]]"),
+            self.note(
+                "kind: map\nmap_role: theme\nstatus: evergreen",
+                "# 主题地图：地图\n\n[[已覆盖]]",
+            ),
         )
         self.write(
             "40-发布/10-X长文/文章.md",
@@ -405,7 +496,10 @@ freshness_status: stale
         )
         self.write(
             "20-知识/70-知识地图/地图.md",
-            self.note("kind: map\nstatus: evergreen", "[[AI Agent]]"),
+            self.note(
+                "kind: map\nmap_role: theme\nstatus: evergreen",
+                "# 主题地图：地图\n\n[[AI Agent]]",
+            ),
         )
 
         references = health.topic_knowledge_reference_issues()
@@ -434,6 +528,46 @@ freshness_status: stale
         references = health.topic_knowledge_reference_issues()
         self.assertEqual(len(references), 1)
         self.assertIn("指向非活跃知识", references[0]["issue"])
+
+    def test_candidate_checks_every_extracted_knowledge_unit(self) -> None:
+        self.write(
+            "10-创作/10-灵感/20-候选选题/多知识.md",
+            self.note(
+                "kind: topic-candidate\nstatus: candidate\n"
+                "knowledge_status: extracted\n"
+                'knowledge_file: "20-知识/10-概念/存在.md"\n'
+                'knowledge_files_json: "[\\"20-知识/10-概念/存在.md\\",'
+                '\\"20-知识/30-问题/不存在.md\\"]"'
+            ),
+        )
+        self.write(
+            "20-知识/10-概念/存在.md",
+            self.note("kind: concept\nstatus: seed", "内容"),
+        )
+
+        references = health.topic_knowledge_reference_issues()
+
+        self.assertEqual(len(references), 1)
+        self.assertIn("20-知识/30-问题/不存在.md", references[0]["issue"])
+
+    def test_repeated_source_failure_becomes_red_instead_of_hidden(self) -> None:
+        state = {
+            "source_health": {
+                "mobile": {
+                    "label": "手机分享",
+                    "status": "degraded",
+                    "consecutive_failures": 3,
+                    "last_failure_at": "2026-07-30T00:00:00-07:00",
+                    "message": "Resource deadlock avoided",
+                }
+            }
+        }
+
+        degraded, red, yellow = health.source_health_findings(state)
+
+        self.assertEqual(len(degraded), 1)
+        self.assertEqual(yellow, [])
+        self.assertEqual(red, ["手机分享已连续 3 轮读取失败"])
 
     def test_daily_report_accepts_legacy_metrics_without_new_fields(self) -> None:
         legacy_metrics = {
@@ -468,6 +602,12 @@ freshness_status: stale
             "knowledge_total": 0,
             "top_pending": [],
             "cleanup_retention_days": 90,
+            "entity_identity_issues": [
+                {
+                    "file": "20-知识/25-产品与模型/Kimi K3.md；20-知识/25-产品与模型/Kimi.md",
+                    "issue": "同类对象的名称或别名冲突",
+                }
+            ],
         }
 
         report = health.daily_report(legacy_metrics)
@@ -475,6 +615,11 @@ freshness_status: stale
         self.assertIn("## 创作健康", report)
         self.assertIn("| 今日可选 | 0 |", report)
         self.assertIn("## 运行健康", report)
+        self.assertIn(
+            "[[20-知识/25-产品与模型/Kimi K3]]；[[20-知识/25-产品与模型/Kimi]]",
+            report,
+        )
+        self.assertNotIn("Kimi K3.md；20-知识", report)
 
 
 class ContentSnapshotHealthTests(unittest.TestCase):
@@ -592,6 +737,10 @@ class ReportRetentionTests(unittest.TestCase):
         for name in ("2026-W22.md", "2026-W23.md", "2026-W30.md"):
             self.write(health.WEEKLY_DIR / name, name)
         self.write(health.WEEKLY_DIR / "最新知识库周报.md", "latest weekly")
+        map_digest_dir = health.VAULT / health.MAP_DIGEST_WEEKLY_DIR_REL
+        for name in ("2026-W22.md", "2026-W30.md"):
+            self.write(map_digest_dir / name, name)
+        self.write(map_digest_dir / "最新知识地图整理.md", "latest digest")
 
         result = health.archive_report_history(reference_date=date(2026, 7, 23))
 
@@ -617,6 +766,15 @@ class ReportRetentionTests(unittest.TestCase):
                 / "知识库周报/2026/2026-W22.md"
             ).exists()
         )
+        self.assertFalse((map_digest_dir / "2026-W22.md").exists())
+        self.assertTrue((map_digest_dir / "2026-W30.md").exists())
+        self.assertTrue((map_digest_dir / "最新知识地图整理.md").exists())
+        self.assertTrue(
+            (
+                health.REPORT_ARCHIVE_DIR
+                / "知识地图整理/2026/2026-W22.md"
+            ).exists()
+        )
 
     def test_existing_archive_is_not_overwritten(self) -> None:
         source = health.DAILY_DIR / "2026-07-16.md"
@@ -635,6 +793,22 @@ class ReportRetentionTests(unittest.TestCase):
         self.assertEqual(result["daily_archived"], [
             "90-归档/40-系统报告/知识库健康日报/2026-07/2026-07-16-2.md"
         ])
+
+    def test_archiving_report_updates_existing_wikilinks(self) -> None:
+        source = health.DAILY_DIR / "2026-07-16.md"
+        backlink = health.VAULT / "20-知识/40-观点/引用日报.md"
+        self.write(source, "old report")
+        self.write(
+            backlink,
+            "[[00-入口/20-日报/知识库健康日报/2026-07-16|旧日报]]\n",
+        )
+
+        health.archive_report_history(reference_date=date(2026, 7, 23))
+
+        self.assertIn(
+            "[[90-归档/40-系统报告/知识库健康日报/2026-07/2026-07-16|旧日报]]",
+            backlink.read_text(encoding="utf-8"),
+        )
 
     def test_daily_generation_triggers_retention(self) -> None:
         metrics = {
@@ -680,6 +854,17 @@ class ReportRetentionTests(unittest.TestCase):
         }
         with (
             mock.patch.object(health, "now_local", return_value=now),
+            mock.patch.object(
+                health,
+                "refresh_weekly_map_digest",
+                return_value={
+                    "summary": {
+                        "maps_with_new_knowledge": 2,
+                        "new_knowledge_count": 8,
+                        "pending_action_count": 6,
+                    }
+                },
+            ) as map_digest,
             mock.patch.object(health, "weekly_context", return_value=context),
             mock.patch.object(
                 health, "generate_weekly_with_codex", return_value="# weekly\n"
@@ -693,6 +878,11 @@ class ReportRetentionTests(unittest.TestCase):
         archive.assert_called_once_with(reference_date=date(2026, 7, 23))
         self.assertEqual(report, health.WEEKLY_DIR / "2026-W30.md")
         self.assertTrue(report.exists())
+        self.assertIn(
+            "本周有 2 张地图需要整理",
+            report.read_text(encoding="utf-8"),
+        )
+        map_digest.assert_called_once()
 
 
 class PublishedMetadataTests(unittest.TestCase):
@@ -819,6 +1009,89 @@ wechat_published_at: ""
         self.assertEqual(
             self.missing_fields(), ["公众号准确发布时间", "公众号公开链接"]
         )
+
+
+class EntityIdentityHealthTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.old_vault = health.VAULT
+        self.old_knowledge = health.KNOWLEDGE_DIR
+        health.VAULT = Path(self.temp.name)
+        health.KNOWLEDGE_DIR = health.VAULT / "20-知识"
+
+    def tearDown(self) -> None:
+        health.VAULT = self.old_vault
+        health.KNOWLEDGE_DIR = self.old_knowledge
+        self.temp.cleanup()
+
+    def write_entity(
+        self,
+        folder: str,
+        name: str,
+        entity_type: str,
+        entity_id: str,
+        aliases: str = "[]",
+    ) -> None:
+        path = health.KNOWLEDGE_DIR / folder / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"""---
+kind: entity
+entity_type: {entity_type}
+entity_id: {entity_id}
+aliases: {aliases}
+---
+
+# {name}
+""",
+            encoding="utf-8",
+        )
+
+    def test_reports_duplicate_identity_wrong_directory_and_missing_id(self) -> None:
+        self.write_entity(
+            "20-人物与组织",
+            "埃隆·马斯克",
+            "人物",
+            "entity-musk",
+            '["Elon Musk"]',
+        )
+        self.write_entity(
+            "20-人物与组织",
+            "Elon Musk",
+            "人物",
+            "",
+            '["Musk"]',
+        )
+        self.write_entity(
+            "20-人物与组织",
+            "Fable 5",
+            "模型",
+            "entity-fable",
+        )
+
+        issues = health.entity_identity_issues()
+        messages = [item["issue"] for item in issues]
+
+        self.assertIn("缺少稳定身份", messages)
+        self.assertTrue(any("目录" in message for message in messages))
+        self.assertIn("同类对象的名称或别名冲突", messages)
+
+    def test_cross_type_alias_is_not_treated_as_duplicate(self) -> None:
+        self.write_entity(
+            "20-人物与组织",
+            "Moonshot AI",
+            "公司",
+            "entity-company",
+            '["Kimi"]',
+        )
+        self.write_entity(
+            "25-产品与模型",
+            "Kimi",
+            "产品",
+            "entity-product",
+        )
+
+        self.assertEqual(health.entity_identity_issues(), [])
 
 
 if __name__ == "__main__":

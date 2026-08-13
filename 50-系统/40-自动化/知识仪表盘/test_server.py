@@ -35,6 +35,8 @@ relevance_score: 96
 knowledge_value_score: 88
 writing_value_score: 94
 timeliness: 高
+knowledge_unit_count: 3
+entity_count: 1
 source_url: "https://example.com"
 ---
 
@@ -77,6 +79,11 @@ source_url: "https://example.com"
             mock.patch.object(dashboard, "INGEST_SCRIPT", self.ingest_script),
             mock.patch.object(dashboard, "RECORD_SCRIPT", self.record_script),
             mock.patch.object(dashboard, "STATE_HOME", self.vault / ".state"),
+            mock.patch.object(
+                dashboard,
+                "TOPIC_MAP_CANDIDATE_STATE",
+                self.vault / ".state/topic-map-candidates.json",
+            ),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -99,6 +106,25 @@ source_url: "https://example.com"
             "10-创作/10-灵感/10-待评估/剪藏复核/test.md", None
         )
         self.assertNotIn("- [x]", self.card.read_text(encoding="utf-8"))
+
+    def test_auto_knowledge_card_turns_topic_choice_into_both(self) -> None:
+        text = self.card.read_text(encoding="utf-8")
+        self.card.write_text(
+            text.replace(
+                "knowledge_value_score: 88",
+                'knowledge_value_score: 94\nknowledge_auto_at: "2026-08-11T08:00:00-07:00"',
+            ),
+            encoding="utf-8",
+        )
+
+        result = dashboard.choose_review_action(
+            "10-创作/10-灵感/10-待评估/剪藏复核/test.md", "topic"
+        )
+
+        self.assertEqual(result["action"], "both")
+        updated = self.card.read_text(encoding="utf-8")
+        self.assertIn("- [x] 同时沉淀知识并加入候选选题", updated)
+        self.assertIn("- [ ] 只加入候选选题", updated)
 
     def test_old_writing_action_and_card_are_migrated_to_topic(self) -> None:
         text = self.card.read_text(encoding="utf-8")
@@ -153,12 +179,93 @@ source_url: "https://example.com"
         self.assertEqual(payload["knowledge_kinds"], {"concept": 1})
         self.assertEqual(len(dashboard.search_notes("一个概念")), 1)
 
+    def test_dashboard_loads_topic_map_candidates(self) -> None:
+        dashboard.TOPIC_MAP_CANDIDATE_STATE.parent.mkdir(parents=True)
+        dashboard.TOPIC_MAP_CANDIDATE_STATE.write_text(
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": "topic-context",
+                            "name": "上下文工程",
+                            "proposal": "拆分",
+                            "note_count": 8,
+                            "source_count": 4,
+                            "reason": "现有地图已经过宽。",
+                            "question": "上下文如何稳定进入任务？",
+                            "supporting_notes": [],
+                        }
+                    ],
+                    "observing": [{"id": "topic-memory", "name": "长期记忆"}],
+                    "summary": {
+                        "theme_map_count": 5,
+                        "true_unmapped_count": 2,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        payload = dashboard.dashboard_payload()
+
+        self.assertEqual(payload["counts"]["topic_map_candidates"], 1)
+        self.assertEqual(payload["topic_map_candidates"][0]["name"], "上下文工程")
+        self.assertEqual(payload["topic_map_observing"][0]["name"], "长期记忆")
+        self.assertEqual(payload["topic_map_summary"]["theme_map_count"], 5)
+
+    def test_dashboard_lists_weekly_map_digest_when_available(self) -> None:
+        note = self.vault / dashboard.MAP_DIGEST_NOTE_REL
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("# 知识地图整理\n", encoding="utf-8")
+
+        payload = dashboard.dashboard_payload()
+
+        self.assertIn(
+            {
+                "title": "知识地图整理",
+                "path": dashboard.MAP_DIGEST_NOTE_REL,
+            },
+            payload["reports"],
+        )
+
+    def test_topic_map_action_is_forwarded_and_logged(self) -> None:
+        returned = {
+            "ok": True,
+            "message": "已进入 14 天观察期",
+            "state": {"candidates": [], "observing": []},
+        }
+        with (
+            mock.patch.object(
+                dashboard,
+                "apply_topic_map_candidate_action",
+                return_value=returned,
+            ) as apply_action,
+            mock.patch.object(dashboard, "log_operation") as log_operation,
+        ):
+            result = dashboard.choose_topic_map_candidate(
+                "topic-context",
+                "watch",
+            )
+
+        self.assertEqual(result, returned)
+        apply_action.assert_called_once_with(
+            self.vault,
+            dashboard.TOPIC_MAP_CANDIDATE_STATE,
+            "topic-context",
+            "watch",
+            self.vault / dashboard.TOPIC_MAP_CANDIDATE_NOTE_REL,
+        )
+        log_operation.assert_called_once()
+
     def test_dashboard_reads_real_creation_stages_and_feedback(self) -> None:
         topics_dir = self.vault / dashboard.LAYOUT["topics_dir"]
         topics_dir.mkdir(parents=True)
         (topics_dir / "候选低.md").write_text(
             "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 96\n"
             "writing_value_score: 99\nknowledge_value_score: 72\ntimeliness: 中\n"
+            "attention_entered_at: 2099-01-01\nattention_until: 2099-01-08\n"
+            "attention_status: fresh\n"
             "source_published_at: 2099-01-01\nfresh_until: 2099-12-31\n"
             "freshness_status: fresh\n---\n\n# 候选低\n",
             encoding="utf-8",
@@ -166,6 +273,8 @@ source_url: "https://example.com"
         (topics_dir / "候选高.md").write_text(
             "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 96\n"
             "writing_value_score: 80\nknowledge_value_score: 90\ntimeliness: 高\n"
+            "attention_entered_at: 2099-01-01\nattention_until: 2099-01-08\n"
+            "attention_status: fresh\n"
             "source_published_at: 2099-01-01\nfresh_until: 2099-12-31\n"
             "freshness_status: fresh\n---\n\n# 候选高\n",
             encoding="utf-8",
@@ -173,6 +282,8 @@ source_url: "https://example.com"
         (topics_dir / "候选次优.md").write_text(
             "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 82\n"
             "writing_value_score: 100\nknowledge_value_score: 75\ntimeliness: 中\n"
+            "attention_entered_at: 2099-01-01\nattention_until: 2099-01-08\n"
+            "attention_status: fresh\n"
             "source_published_at: 2099-01-01\nfresh_until: 2099-12-31\n"
             "freshness_status: fresh\n---\n\n# 候选次优\n",
             encoding="utf-8",
@@ -254,12 +365,18 @@ source_url: "https://example.com"
             encoding="utf-8",
         )
         payload = dashboard.dashboard_payload()
-        self.assertEqual(payload["schema_version"], 6)
+        self.assertEqual(payload["schema_version"], 8)
         self.assertTrue(payload["server_started_at"])
         self.assertIn("topic-candidate", payload["board_protocol"])
         self.assertIn("content-feedback", payload["board_protocol"])
         self.assertIn("last_activity", payload["pipeline"])
         self.assertEqual(payload["pipeline"]["unresolved_errors"], 0)
+        self.assertEqual(payload["pipeline"]["degraded_sources"], 0)
+        self.assertEqual(payload["reviews"][0]["knowledge_unit_count"], 3)
+        self.assertEqual(payload["reviews"][0]["entity_count"], 1)
+        self.assertEqual(payload["reviews"][0]["knowledge_auto_at"], "")
+        self.assertEqual(payload["reviews"][0]["personal_context_status"], "")
+        self.assertEqual(payload["review_daily_limit"], 3)
         self.assertEqual(payload["reports"], [])
         self.assertEqual(
             [(item["shortcut"], item["key"]) for item in payload["review_actions"]],
@@ -295,31 +412,44 @@ source_url: "https://example.com"
         self.assertEqual(payload["counts"]["feedback"], 2)
         self.assertEqual(payload["counts"]["feedback_pending"], 1)
 
-    def test_dashboard_hides_expired_or_unknown_candidates(self) -> None:
+    def test_dashboard_uses_attention_window_instead_of_source_freshness(self) -> None:
         topics_dir = self.vault / dashboard.LAYOUT["topics_dir"]
         topics_dir.mkdir(parents=True)
         fixtures = {
-            "新鲜.md": (
+            "新鲜.md": (90, (
                 "source_published_at: 2099-01-01\n"
-                "fresh_until: 2099-12-31\nfreshness_status: fresh"
-            ),
-            "过期.md": (
+                "fresh_until: 2099-12-31\nfreshness_status: fresh\n"
+                "attention_entered_at: 2099-01-01\n"
+                "attention_until: 2099-01-08\nattention_status: fresh"
+            )),
+            "资料过期但刚进候选.md": (80, (
                 "source_published_at: 2019-12-01\n"
-                "fresh_until: 2020-01-01\nfreshness_status: stale"
-            ),
-            "未知.md": (
-                'source_published_at: ""\nfresh_until: ""\nfreshness_status: unknown'
-            ),
-            "无来源依据.md": "fresh_until: 2099-12-31\nfreshness_status: fresh",
+                "fresh_until: 2020-01-01\nfreshness_status: stale\n"
+                "attention_entered_at: 2099-01-01\n"
+                "attention_until: 2099-01-08\nattention_status: fresh"
+            )),
+            "来源日期未知.md": (70, (
+                'source_published_at: ""\nfresh_until: ""\nfreshness_status: unknown\n'
+                "attention_entered_at: 2099-01-01\n"
+                "attention_until: 2099-01-08\nattention_status: fresh"
+            )),
+            "候选期已结束.md": (100, (
+                "source_published_at: 2099-01-01\nfresh_until: 2099-12-31\n"
+                "freshness_status: fresh\nattention_entered_at: 2020-01-01\n"
+                "attention_until: 2020-01-08\nattention_status: expired"
+            )),
         }
-        for name, freshness in fixtures.items():
+        for name, (priority, fields) in fixtures.items():
             (topics_dir / name).write_text(
-                "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 80\n"
-                f"writing_value_score: 80\n{freshness}\n---\n\n# {Path(name).stem}\n",
+                f"---\nkind: topic-candidate\nstatus: candidate\npriority_score: {priority}\n"
+                f"writing_value_score: 80\n{fields}\n---\n\n# {Path(name).stem}\n",
                 encoding="utf-8",
             )
         rows = dashboard.load_topic_candidates(dashboard.markdown_files())
-        self.assertEqual([row["title"] for row in rows], ["新鲜"])
+        self.assertEqual(
+            [row["title"] for row in rows],
+            ["新鲜", "资料过期但刚进候选", "来源日期未知"],
+        )
 
     def test_dashboard_surfaces_latest_health_reasons(self) -> None:
         snapshots = self.vault / ".state/health-snapshots"
@@ -381,6 +511,10 @@ source_url: "https://example.com"
         layout = dict(dashboard.DEFAULT_LAYOUT)
         created = bootstrap.build_vault(target, layout, demo=True)
         self.assertTrue(created)
+        manifest = json.loads((target / ".ray-obsidian.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["layout"], "ray-content-v2")
+        self.assertEqual(manifest["managed_by"], "rays-brain-kit")
         with mock.patch.object(dashboard, "VAULT", target), \
              mock.patch.object(dashboard, "REVIEW_DIR", target / layout["review_dir"]), \
              mock.patch.object(dashboard, "INBOX_FILE", target / layout["inbox_file"]):
@@ -466,7 +600,9 @@ source_url: "https://example.com"
         topics_dir.mkdir(parents=True, exist_ok=True)
         path = topics_dir / name
         path.write_text(
-            f"---\nkind: topic-candidate\nstatus: {status}\npriority_score: 90\n---\n\n# 一个候选\n\n正文。\n",
+            f"---\nkind: topic-candidate\nstatus: {status}\npriority_score: 90\n"
+            "attention_entered_at: 2099-01-01\nattention_until: 2099-01-08\n"
+            "attention_status: fresh\n---\n\n# 一个候选\n\n正文。\n",
             encoding="utf-8",
         )
         return path
@@ -490,8 +626,12 @@ source_url: "https://example.com"
         text = path.read_text(encoding="utf-8")
         self.assertIn("status: parked", text)
         self.assertIn("updated_at:", text)
+        self.assertIn("attention_status: inactive", text)
         back = dashboard.apply_transition(rel, "candidate", result["mtime_ns"])
-        self.assertIn("status: candidate", path.read_text(encoding="utf-8"))
+        reopened = path.read_text(encoding="utf-8")
+        self.assertIn("status: candidate", reopened)
+        self.assertIn("attention_status: fresh", reopened)
+        self.assertRegex(reopened, r"attention_until: \d{4}-\d{2}-\d{2}")
         self.assertTrue(back["ok"])
 
     def test_transition_rejects_undeclared_or_conflicting_changes(self) -> None:
@@ -651,6 +791,35 @@ source_url: "https://example.com"
         with self.assertRaisesRegex(ValueError, "处理过"):
             dashboard.resolve_pipeline_error("2026-07-28T10:00:00", "x sync failed")
 
+    def test_pipeline_status_exposes_degraded_source(self) -> None:
+        state_dir = self.vault / ".state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "errors": [],
+                    "source_health": {
+                        "mobile": {
+                            "label": "手机分享",
+                            "status": "degraded",
+                            "consecutive_failures": 4,
+                            "last_failure_at": "2026-07-30T00:00:00-07:00",
+                            "message": "Resource deadlock avoided",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status = dashboard.pipeline_status()
+
+        self.assertEqual(len(status["degraded_sources"]), 1)
+        self.assertEqual(
+            status["degraded_sources"][0]["consecutive_failures"],
+            4,
+        )
+
     def test_start_draft_run_validates_target_and_reentry(self) -> None:
         task_dir = self.vault / dashboard.LAYOUT["writing_tasks_dir"]
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -782,6 +951,63 @@ source_url: "https://example.com"
                 dashboard.promote_candidate(
                     "10-创作/10-灵感/20-候选选题/候选.md", "一个角度"
                 )
+
+
+class TailnetAccessTests(unittest.TestCase):
+    @staticmethod
+    def _handler(headers: dict[str, str]):
+        handler = dashboard.DashboardHandler.__new__(dashboard.DashboardHandler)
+        handler.headers = headers
+        return handler
+
+    def test_request_host_handles_ports_and_ipv6_literals(self) -> None:
+        self.assertEqual(dashboard.request_host("127.0.0.1:8765"), "127.0.0.1")
+        self.assertEqual(dashboard.request_host("[::1]:8765"), "::1")
+        self.assertEqual(
+            dashboard.request_host("Creator-Mac.Example.TS.NET:8765"),
+            "creator-mac.example.ts.net",
+        )
+        self.assertEqual(dashboard.request_host(""), "")
+
+    def test_is_tailnet_address_only_matches_tailscale_ranges(self) -> None:
+        self.assertTrue(dashboard.is_tailnet_address("100.64.0.42"))
+        self.assertTrue(dashboard.is_tailnet_address("fd7a:115c:a1e0::b001:e69b"))
+        self.assertFalse(dashboard.is_tailnet_address("192.168.1.10"))
+        self.assertFalse(dashboard.is_tailnet_address("8.8.8.8"))
+        self.assertFalse(dashboard.is_tailnet_address("not-an-ip"))
+
+    def test_tailnet_host_and_origin_require_optin(self) -> None:
+        # 默认（未开 --tailnet）：tailnet 主机名一律拒绝，行为与旧版一致
+        self.assertFalse(self._handler({"Host": "100.64.0.42:8765"}).allowed_host())
+        self.assertTrue(self._handler({"Host": "127.0.0.1:8765"}).allowed_host())
+        extra = {"100.64.0.42", "creator-mac.example.ts.net"}
+        with mock.patch.object(dashboard, "EXTRA_ALLOWED_HOSTS", extra):
+            self.assertTrue(self._handler({"Host": "100.64.0.42:8765"}).allowed_host())
+            self.assertTrue(
+                self._handler({"Host": "creator-mac.example.ts.net:8765"}).allowed_host()
+            )
+            # DNS rebinding：Host 不在白名单仍然拒绝
+            self.assertFalse(self._handler({"Host": "evil.example.com:8765"}).allowed_host())
+            self.assertTrue(
+                self._handler({"Origin": "http://creator-mac.example.ts.net:8765"}).local_origin()
+            )
+            self.assertTrue(
+                self._handler({"Origin": "https://creator-mac.example.ts.net"}).local_origin()
+            )
+            self.assertFalse(self._handler({"Origin": "http://evil.example.com"}).local_origin())
+        self.assertFalse(
+            self._handler({"Origin": "http://creator-mac.example.ts.net:8765"}).local_origin()
+        )
+
+    def test_ponte_hosts_allowed_without_optin(self) -> None:
+        # Surge Ponte 在本机把 *.sgponte 解析到 127.0.0.1，视同本机访问，无需开关
+        self.assertTrue(self._handler({"Host": "creator-mac.sgponte:8765"}).allowed_host())
+        self.assertTrue(
+            self._handler({"Origin": "http://creator-mac.sgponte:8765"}).local_origin()
+        )
+        # 不是该后缀的域名不受影响
+        self.assertFalse(self._handler({"Host": "sgponte.evil.com:8765"}).allowed_host())
+        self.assertFalse(self._handler({"Host": "evil-sgponte.com:8765"}).allowed_host())
 
 
 class DegradedProtocolTests(unittest.TestCase):

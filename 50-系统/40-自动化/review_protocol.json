@@ -1,5 +1,23 @@
 {
-  "version": 1,
+  "version": 2,
+  "review_attention": {
+    "daily_limit": 3,
+    "unreviewed_days": 7
+  },
+  "auto_routing": {
+    "auto_knowledge": {
+      "enabled": true,
+      "recommendation": "保留",
+      "confidence": "高",
+      "min_knowledge_value_score": 90,
+      "min_knowledge_over_writing_gap": 5,
+      "require_explicit_complete_units": true,
+      "policy_id": "high-confidence-knowledge-v1"
+    }
+  },
+  "topic_attention": {
+    "candidate_days": 7
+  },
   "actions": [
     {
       "key": "both",

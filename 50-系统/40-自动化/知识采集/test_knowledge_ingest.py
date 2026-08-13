@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -132,6 +133,39 @@ tweet_id: "2040000000000000001"
         self.assertNotIn("旧的、不完整的正文。", text)
         ingest.write_x_bookmark(self.tweet(), "tester", None)
         self.assertIn("这是我手写的总结。", path.read_text(encoding="utf-8"))
+
+    def test_preserves_source_summary_without_reclassifying_it_as_personal_notes(self) -> None:
+        current = """---
+capture_source: x-bookmark
+tweet_id: "2040000000000000001"
+---
+
+# Current
+
+## 来源摘要
+
+这是外部文章的内容摘要。
+
+## 推文
+
+原始推文。
+"""
+        kept = ingest.preserved_x_notes(current)
+
+        self.assertIn("## 来源摘要", kept)
+        self.assertIn("这是外部文章的内容摘要。", kept)
+        self.assertNotIn("## 个人笔记", kept)
+        self.assertEqual(ingest.personal_context_from_source(current), "")
+
+    def test_processing_record_is_not_personal_context(self) -> None:
+        source = """# Source
+
+## 处理记录
+
+这是一段机器生成的知识连接建议。
+"""
+
+        self.assertEqual(ingest.personal_context_from_source(source), "")
 
     def test_writes_inline_article_body(self) -> None:
         tweet = self.tweet()
@@ -504,7 +538,13 @@ class WeReadIngestTests(unittest.TestCase):
         self.temp.cleanup()
 
     @staticmethod
-    def book_text(status: str, mark: str = "第一条划线", *, count: int = 1) -> str:
+    def book_text(
+        status: str,
+        mark: str = "第一条划线",
+        *,
+        count: int = 1,
+        judgement: str = "待判断。",
+    ) -> str:
         synced_at = datetime.now().astimezone().isoformat(timespec="seconds")
         return f"""---
 kind: "source"
@@ -531,7 +571,7 @@ synced_at: "{synced_at}"
 
 ## 我的判断
 
-待判断。
+{judgement}
 """
 
     def test_processed_existing_books_become_baseline_without_backfill(self) -> None:
@@ -615,6 +655,8 @@ synced_at: "{synced_at}"
         )
         self.assertIn('source_url: "https://weread.qq.com/test"', card_text)
         self.assertIn("source_published_at:", card_text)
+        self.assertIn("personal_context_status: missing", card_text)
+        self.assertNotIn("## Ray 的经验", card_text)
         self.assertIn("- [ ] 同时沉淀知识并加入候选选题", card_text)
         rendered_actions = [
             line.removeprefix("- [ ] ")
@@ -623,6 +665,139 @@ synced_at: "{synced_at}"
         ]
         self.assertEqual(rendered_actions, ingest.CANONICAL_REVIEW_LABELS)
         self.assertEqual(state["pending_sources"], [])
+        card_meta = ingest.parse_frontmatter(card_text)
+        expiry = date.fromisoformat(card_meta["attention_until"])
+        preview = ingest.maintain_review_attention(
+            state, today=expiry, dry_run=True
+        )
+        self.assertEqual(preview["source_only"], 1)
+        self.assertTrue(card.exists())
+        applied = ingest.maintain_review_attention(state, today=expiry)
+        self.assertEqual(applied["source_only"], 1)
+        self.assertFalse(card.exists())
+        archived = next(ingest.REVIEW_RECORD_DIR.rglob("*.md"))
+        archived_meta = ingest.parse_frontmatter(
+            archived.read_text(encoding="utf-8")
+        )
+        self.assertEqual(archived_meta["status"], "已保留来源")
+        self.assertEqual(archived_meta["routing_outcome"], "source-only")
+        self.assertIn("processing_status: processed", source.read_text(encoding="utf-8"))
+
+    def test_only_narrow_high_confidence_reviews_auto_extract_seed_knowledge(self) -> None:
+        source = ingest.WEREAD_DIR / "《测试之书》.md"
+        source.write_text(
+            self.book_text(
+                "unprocessed",
+                judgement="我在自己的知识库里反复遇到过：资料输入很快，但审核时间不足会让输出停住。",
+            ),
+            encoding="utf-8",
+        )
+        ingest.REVIEW_DIR.mkdir(parents=True)
+        state = ingest.default_state()
+        ingest.discover_weread_cards(state)
+        version_id = ingest.source_id(source, source.read_text(encoding="utf-8"))
+        review = {
+            "id": version_id,
+            "title": "背景比提示词更重要",
+            "recommendation": "保留",
+            "relevance_score": 93,
+            "knowledge_value_score": 94,
+            "writing_value_score": 89,
+            "time_sensitivity": "常青",
+            "confidence": "高",
+            "suggested_kind": "观点",
+            "topics": ["AI 工作流"],
+            "reason": "有明确的一手表达和可复用判断。",
+            "reader_value": "帮助读者判断应该给模型补什么。",
+            "summary": "模型要完成真实工作，需要得到任务背后的完整背景。",
+            "core_claims": ["背景比单次提示词更重要。"],
+            "evidence": ["原书划线给出了完整判断。"],
+            "counterpoints": ["简单任务仍可能不需要大量背景。"],
+            "connections": [],
+            "writing_angles": ["企业如何为模型准备背景。"],
+            "knowledge_units": [
+                {
+                    "title": "模型完成真实工作依赖完整背景",
+                    "kind": "观点",
+                    "summary": "模型要进入真实工作流，关键是获得任务背后的完整背景。",
+                    "core_claims": ["背景比单次提示词更重要。"],
+                    "evidence": ["原书划线给出了完整判断。"],
+                    "counterpoints": ["简单任务仍可能例外。"],
+                    "connections": [],
+                    "people": [],
+                }
+            ],
+            "entities": [],
+        }
+        policy = {
+            "enabled": True,
+            "recommendation": "保留",
+            "confidence": "高",
+            "min_knowledge_value_score": 90,
+            "min_knowledge_over_writing_gap": 5,
+            "require_explicit_complete_units": True,
+            "policy_id": "test-policy",
+        }
+
+        with (
+            patch.object(ingest, "AUTO_KNOWLEDGE_POLICY", policy),
+            patch.object(ingest, "run_codex", return_value={"reviews": [review]}),
+        ):
+            count = ingest.review_pending(state, {})
+
+        self.assertEqual(count, 1)
+        card = next(ingest.REVIEW_DIR.glob("*.md"))
+        card_text = card.read_text(encoding="utf-8")
+        card_meta = ingest.parse_frontmatter(card_text)
+        self.assertEqual(card_meta["status"], "待审核")
+        self.assertEqual(card_meta["knowledge_status"], "extracted")
+        self.assertEqual(card_meta["knowledge_auto_policy"], "test-policy")
+        self.assertTrue(card_meta["knowledge_auto_at"])
+        self.assertEqual(card_meta["personal_context_status"], "captured")
+        self.assertIn("## 已自动沉淀的知识", card_text)
+        self.assertIn("## Ray 的经验", card_text)
+        self.assertIn("审核时间不足会让输出停住", card_text)
+        knowledge_files = [
+            path
+            for path in ingest.KNOWLEDGE_DIR.rglob("*.md")
+            if "knowledge_unit_id:" in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(len(knowledge_files), 1)
+        knowledge_text = knowledge_files[0].read_text(encoding="utf-8")
+        self.assertIn("status: seed", knowledge_text)
+        self.assertIn("personal_context_status: captured", knowledge_text)
+        self.assertIn("## Ray 的经验", knowledge_text)
+        self.assertIn("审核时间不足会让输出停住", knowledge_text)
+        self.assertFalse(ingest.TOPIC_DIR.exists())
+        self.assertIn("processing_status: unprocessed", source.read_text(encoding="utf-8"))
+
+        expiry = date.fromisoformat(card_meta["attention_until"])
+        before = ingest.maintain_review_attention(
+            state, today=expiry - timedelta(days=1), dry_run=True
+        )
+        self.assertEqual(before["archived"], 0)
+        preview = ingest.maintain_review_attention(
+            state, today=expiry, dry_run=True
+        )
+        self.assertEqual(preview["knowledge"], 1)
+        self.assertTrue(card.exists())
+        applied = ingest.maintain_review_attention(state, today=expiry)
+        self.assertEqual(applied["knowledge"], 1)
+        self.assertFalse(card.exists())
+        archived = next(ingest.REVIEW_RECORD_DIR.rglob("*.md"))
+        archived_meta = ingest.parse_frontmatter(
+            archived.read_text(encoding="utf-8")
+        )
+        self.assertEqual(archived_meta["status"], "已自动沉淀")
+        self.assertEqual(archived_meta["routing_outcome"], "auto-knowledge")
+        self.assertIn("processing_status: processed", source.read_text(encoding="utf-8"))
+        self.assertFalse(ingest.TOPIC_DIR.exists())
+
+        review["writing_value_score"] = 90
+        self.assertFalse(ingest.auto_knowledge_eligible(review))
+        review["writing_value_score"] = 89
+        review.pop("knowledge_units")
+        self.assertFalse(ingest.auto_knowledge_eligible(review))
 
     def test_both_action_marks_book_processed_and_backlinks_source(self) -> None:
         source = ingest.WEREAD_DIR / "《测试之书》.md"
@@ -844,7 +1019,7 @@ created_at: "2026-07-23T10:00:00-07:00"
             "2026-07-22T10:00:00.000Z",
         )
 
-    def test_stale_source_is_parked_instead_of_entering_today_candidates(self) -> None:
+    def test_stale_source_still_gets_a_new_candidate_attention_window(self) -> None:
         card = ingest.REVIEW_DIR / "stale.md"
         card.parent.mkdir(parents=True)
         text = self.review_text()
@@ -854,13 +1029,115 @@ created_at: "2026-07-23T10:00:00-07:00"
         )
         card.write_text(text, encoding="utf-8")
 
-        topic = ingest.create_topic_candidate(card, text, ingest.parse_frontmatter(text))
+        with patch.object(
+            ingest, "now_local", return_value="2026-08-10T10:00:00-07:00"
+        ):
+            topic = ingest.create_topic_candidate(
+                card, text, ingest.parse_frontmatter(text)
+            )
         topic_text = topic.read_text(encoding="utf-8")
 
-        self.assertEqual(topic.parent, ingest.TOPIC_RESERVE_DIR)
-        self.assertIn("status: parked", topic_text)
-        self.assertIn("freshness_status: stale", topic_text)
-        self.assertIn("priority_score: 0", topic_text)
+        self.assertEqual(topic.parent, ingest.TOPIC_DIR)
+        topic_meta = ingest.parse_frontmatter(topic_text)
+        self.assertEqual(topic_meta["status"], "candidate")
+        self.assertEqual(topic_meta["freshness_status"], "stale")
+        self.assertEqual(
+            topic_meta["attention_entered_at"], "2026-08-10T10:00:00-07:00"
+        )
+        self.assertEqual(topic_meta["attention_until"], "2026-08-17")
+        self.assertEqual(topic_meta["attention_status"], "fresh")
+
+    def test_candidate_closes_after_seven_days_without_losing_knowledge(self) -> None:
+        ingest.TOPIC_DIR.mkdir(parents=True)
+        topic = ingest.TOPIC_DIR / "topic.md"
+        topic.write_text(
+            """---
+kind: topic-candidate
+status: candidate
+created_at: "2026-08-10T10:00:00-07:00"
+source_file: "30-资料/source.md"
+knowledge_file: "20-知识/knowledge.md"
+knowledge_status: extracted
+---
+
+# 七天未立项的候选
+""",
+            encoding="utf-8",
+        )
+
+        before = ingest.maintain_topic_attention(
+            today=date(2026, 8, 16), dry_run=False
+        )
+        self.assertEqual(before["closed"], 0)
+        self.assertIn("status: candidate", topic.read_text(encoding="utf-8"))
+
+        preview = ingest.maintain_topic_attention(
+            today=date(2026, 8, 17), dry_run=True
+        )
+        self.assertEqual(preview["closed"], 1)
+        self.assertIn("status: candidate", topic.read_text(encoding="utf-8"))
+
+        applied = ingest.maintain_topic_attention(
+            today=date(2026, 8, 17), dry_run=False
+        )
+        result = topic.read_text(encoding="utf-8")
+        result_meta = ingest.parse_frontmatter(result)
+        self.assertEqual(applied["closed"], 1)
+        self.assertEqual(result_meta["status"], "closed")
+        self.assertEqual(result_meta["attention_status"], "expired")
+        self.assertIn('source_file: "30-资料/source.md"', result)
+        self.assertIn('knowledge_file: "20-知识/knowledge.md"', result)
+        self.assertIn("knowledge_status: extracted", result)
+
+    def test_candidate_without_knowledge_settles_before_expiry_close(self) -> None:
+        review = ingest.REVIEW_RECORD_DIR / "2026-08" / "topic-review.md"
+        review.parent.mkdir(parents=True)
+        review_text = self.review_text()
+        review.write_text(review_text, encoding="utf-8")
+        ingest.TOPIC_DIR.mkdir(parents=True)
+        topic = ingest.TOPIC_DIR / "pending-knowledge.md"
+        topic.write_text(
+            f"""---
+kind: topic-candidate
+status: candidate
+created_at: "2026-08-10T10:00:00-07:00"
+source_review: "{ingest.rel(review)}"
+source_file: "30-资料/40-网页剪藏/source.md"
+knowledge_file: ""
+knowledge_status: pending
+---
+
+# 七天后转为知识的候选
+
+## 可调用知识
+
+- 暂无
+""",
+            encoding="utf-8",
+        )
+
+        preview = ingest.maintain_topic_attention(
+            today=date(2026, 8, 17), dry_run=True
+        )
+        self.assertEqual(preview["closed"], 1)
+        self.assertEqual(preview["knowledge_notes"], 1)
+        self.assertFalse(ingest.KNOWLEDGE_DIR.exists())
+        self.assertIn("status: candidate", topic.read_text(encoding="utf-8"))
+
+        applied = ingest.maintain_topic_attention(
+            today=date(2026, 8, 17), dry_run=False
+        )
+        result = topic.read_text(encoding="utf-8")
+        result_meta = ingest.parse_frontmatter(result)
+        self.assertEqual(applied["closed"], 1)
+        self.assertEqual(applied["knowledge_notes"], 1)
+        self.assertEqual(applied["knowledge_unresolved"], [])
+        self.assertEqual(result_meta["status"], "closed")
+        self.assertEqual(result_meta["knowledge_status"], "extracted")
+        self.assertTrue(result_meta["knowledge_settled_at"])
+        knowledge = next(ingest.KNOWLEDGE_DIR.rglob("*.md"))
+        self.assertIn(knowledge.stem, result)
+        self.assertIn("到期沉淀", result)
 
     def test_create_content_pack_preserves_truth_boundaries(self) -> None:
         card = ingest.VAULT / "10-创作/10-灵感/10-待评估/剪藏复核/card.md"
@@ -902,6 +1179,27 @@ created_at: "2026-07-23T10:00:00-07:00"
         self.assertEqual(len(list(ingest.TOPIC_DIR.glob("*.md"))), 1)
         self.assertEqual(len(list(ingest.CONTENT_PACK_DIR.glob("*.md"))), 0)
 
+    def test_auto_knowledge_card_topic_choice_preserves_both_outputs(self) -> None:
+        ingest.REVIEW_DIR.mkdir(parents=True)
+        card = ingest.REVIEW_DIR / "auto-knowledge.md"
+        text = ingest.update_frontmatter(
+            self.review_text(),
+            {"knowledge_auto_at": "2026-08-11T08:00:00-07:00"},
+        )
+        text += "\n## 人工审核\n\n- [ ] 同时沉淀知识并加入候选选题\n- [ ] 只沉淀为长期知识\n- [x] 只加入候选选题\n- [ ] 暂缓\n- [ ] 标记为可恢复的待清理项\n"
+        card.write_text(text, encoding="utf-8")
+
+        result = ingest.process_review_actions()
+
+        self.assertEqual(result["both"], 1)
+        self.assertEqual(result["topic"], 0)
+        self.assertEqual(len(list(ingest.KNOWLEDGE_DIR.rglob("*.md"))), 1)
+        self.assertEqual(len(list(ingest.TOPIC_DIR.glob("*.md"))), 1)
+        archived = next(ingest.REVIEW_RECORD_DIR.rglob("auto-knowledge.md"))
+        self.assertIn(
+            'review_action: "both"', archived.read_text(encoding="utf-8")
+        )
+
     def test_both_action_creates_knowledge_and_topic_from_one_source(self) -> None:
         ingest.REVIEW_DIR.mkdir(parents=True)
         card = ingest.REVIEW_DIR / "both.md"
@@ -918,6 +1216,30 @@ created_at: "2026-07-23T10:00:00-07:00"
         topic_text = topics[0].read_text(encoding="utf-8")
         self.assertIn("knowledge_status: extracted", topic_text)
         self.assertIn(knowledge[0].stem, topic_text)
+
+    def test_personal_context_reaches_topic_and_content_pack(self) -> None:
+        ingest.REVIEW_DIR.mkdir(parents=True)
+        card = ingest.REVIEW_DIR / "personal.md"
+        text = self.review_text() + (
+            "\n## Ray 的经验\n\n"
+            "我自己的瓶颈不是采集，而是没有稳定时间逐条审核。\n"
+        )
+        card.write_text(text, encoding="utf-8")
+
+        topic = ingest.create_topic_candidate(
+            card, text, ingest.parse_frontmatter(text)
+        )
+        topic_text = topic.read_text(encoding="utf-8")
+        self.assertIn("personal_context_status: captured", topic_text)
+        self.assertIn("## Ray 的经验", topic_text)
+        self.assertIn("瓶颈不是采集", topic_text)
+
+        content_pack = ingest.promote_topic(topic, "如何让知识系统不再卡在人工审核")
+        content_text = content_pack.read_text(encoding="utf-8")
+        self.assertIn("## 用户真实材料", content_text)
+        self.assertIn("### 已记录个人材料（使用前确认）", content_text)
+        self.assertIn("瓶颈不是采集", content_text)
+        self.assertIn("### 使用边界", content_text)
 
     def test_promote_requires_angle_and_creates_one_writing_task(self) -> None:
         ingest.TOPIC_DIR.mkdir(parents=True)
@@ -955,6 +1277,932 @@ source_url: ""
         task_text = first.read_text(encoding="utf-8")
         self.assertIn("命令减少后人的价值是什么", task_text)
         self.assertIn("candidate:", task_text)
+
+    def test_new_candidate_can_be_promoted_even_when_source_needs_recheck(self) -> None:
+        ingest.TOPIC_DIR.mkdir(parents=True)
+        topic = ingest.TOPIC_DIR / "old-source-new-candidate.md"
+        topic.write_text(
+            """---
+kind: topic-candidate
+status: candidate
+topic_id: topic-old-source
+time_sensitivity: 中时效
+source_published_at: "2026-01-01T10:00:00Z"
+attention_entered_at: "2026-08-10T10:00:00-07:00"
+attention_until: 2026-08-17
+attention_status: fresh
+source_review: ""
+source_file: ""
+source_url: ""
+---
+
+# 旧资料中的新角度
+
+## 可调用知识
+
+- [[背景信息]]
+""",
+            encoding="utf-8",
+        )
+
+        task = ingest.promote_topic(topic, "只使用其中的长期判断")
+
+        self.assertTrue(task.exists())
+        promoted = topic.read_text(encoding="utf-8")
+        promoted_meta = ingest.parse_frontmatter(promoted)
+        self.assertEqual(promoted_meta["status"], "active")
+        self.assertEqual(promoted_meta["freshness_status"], "stale")
+        self.assertEqual(promoted_meta["attention_status"], "promoted")
+
+
+class MultiKnowledgeUnitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.vault = Path(self.temp.name).resolve()
+        self.saved = {
+            name: getattr(ingest, name)
+            for name in (
+                "VAULT",
+                "LOG_DIR",
+                "REVIEW_DIR",
+                "REVIEW_RECORD_DIR",
+                "KNOWLEDGE_DIR",
+                "TOPIC_DIR",
+                "TOPIC_RESERVE_DIR",
+                "WRITING_TASK_DIR",
+                "CONTENT_PACK_DIR",
+                "WEB_DIR",
+                "X_DIR",
+                "WEREAD_DIR",
+                "TOPIC_MAP_CANDIDATE_STATE",
+                "TOPIC_MAP_CANDIDATE_NOTE",
+                "MAP_DIGEST_STATE",
+                "MAP_DIGEST_NOTE",
+                "MAP_DIGEST_WEEKLY_DIR",
+                "ENTITY_REGISTRY_FILE",
+            )
+        }
+        ingest.VAULT = self.vault
+        ingest.LOG_DIR = self.vault / "logs"
+        ingest.REVIEW_DIR = self.vault / "10-创作/10-灵感/10-待评估/剪藏复核"
+        ingest.REVIEW_RECORD_DIR = self.vault / "90-归档/20-审核记录/剪藏复核"
+        ingest.KNOWLEDGE_DIR = self.vault / "20-知识"
+        ingest.TOPIC_DIR = self.vault / "10-创作/10-灵感/20-候选选题"
+        ingest.TOPIC_RESERVE_DIR = self.vault / "10-创作/10-灵感/90-选题储备"
+        ingest.WRITING_TASK_DIR = self.vault / "10-创作/20-写作任务"
+        ingest.CONTENT_PACK_DIR = ingest.WRITING_TASK_DIR
+        ingest.WEB_DIR = self.vault / "30-资料/40-网页剪藏"
+        ingest.X_DIR = self.vault / "30-资料/30-X书签"
+        ingest.WEREAD_DIR = self.vault / "30-资料/50-读书划线"
+        ingest.TOPIC_MAP_CANDIDATE_STATE = self.vault / ".state/topic-map-candidates.json"
+        ingest.TOPIC_MAP_CANDIDATE_NOTE = (
+            self.vault / "00-入口/10-工作台/主题地图候选.md"
+        )
+        ingest.MAP_DIGEST_STATE = self.vault / ".state/map-digest.json"
+        ingest.MAP_DIGEST_NOTE = self.vault / "00-入口/10-工作台/知识地图整理.md"
+        ingest.MAP_DIGEST_WEEKLY_DIR = (
+            self.vault / "00-入口/20-日报/知识地图整理"
+        )
+        ingest.ENTITY_REGISTRY_FILE = self.vault / "entity_registry.json"
+        ingest.ENTITY_REGISTRY_FILE.write_text(
+            json.dumps(
+                {
+                    "canonical_overrides": [
+                        {
+                            "canonical_name": "埃隆·马斯克",
+                            "entity_type": "人物",
+                            "aliases": ["Elon Musk", "马斯克", "Musk"],
+                        },
+                        {
+                            "canonical_name": "Claude Fable 5",
+                            "entity_type": "模型",
+                            "aliases": ["Fable 5", "Fable"],
+                        },
+                        {
+                            "canonical_name": "Endless1936",
+                            "entity_type": "人物",
+                            "aliases": ["@prototech_ai", "prototech_ai"],
+                        },
+                    ],
+                    "model_names": ["Claude Fable 5", "Kimi K3"],
+                    "remove_aliases": {
+                        "Claude": ["Claude Code"],
+                        "Kimi K3": ["Kimi"],
+                        "Moonshot AI": ["Kimi"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        for path in (
+            ingest.REVIEW_DIR,
+            ingest.REVIEW_RECORD_DIR,
+            ingest.KNOWLEDGE_DIR,
+            ingest.TOPIC_DIR,
+            ingest.TOPIC_RESERVE_DIR,
+            ingest.WEB_DIR,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+        self.source = ingest.WEB_DIR / "访谈.md"
+        self.source.write_text(
+            """---
+source_url: "https://example.com/interview"
+published_at: "2026-07-30"
+processing_status: unprocessed
+---
+
+# 访谈
+
+Sam Altman 谈创业、组织和仍未回答的问题。
+""",
+            encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        for name, value in self.saved.items():
+            setattr(ingest, name, value)
+        self.temp.cleanup()
+
+    def review(self, capture_id: str = "file:interview") -> dict:
+        return {
+            "id": capture_id,
+            "title": "Sam Altman 谈 AI 创业与组织",
+            "recommendation": "保留",
+            "relevance_score": 95,
+            "knowledge_value_score": 96,
+            "writing_value_score": 88,
+            "time_sensitivity": "常青",
+            "confidence": "高",
+            "suggested_kind": "观点",
+            "topics": ["AI 创业", "组织"],
+            "reason": "同时包含可复用概念、观点和开放问题。",
+            "reader_value": "读者可以区分机会判断与组织约束。",
+            "summary": "访谈讨论 AI 创业机会、组织能力和未解决问题。",
+            "core_claims": ["AI 降低小团队承担大问题的成本。"],
+            "evidence": ["原访谈给出创业和组织案例。"],
+            "counterpoints": ["预测仍需后续事实验证。"],
+            "connections": [],
+            "writing_angles": ["AI 创业窗口为何扩大。"],
+            "knowledge_units": [
+                {
+                    "id": "K1",
+                    "title": "AI 降低小团队承担大问题的成本",
+                    "kind": "观点",
+                    "summary": "模型能力扩大了小团队的目标上限。",
+                    "core_claims": ["小团队可以追求过去只有大公司能承担的问题。"],
+                    "evidence": ["原访谈讨论成本下降和能力扩张。"],
+                    "counterpoints": ["能力提高不等于组织自动有效。"],
+                    "connections": [],
+                    "people": ["Sam Altman"],
+                },
+                {
+                    "id": "K2",
+                    "title": "AI 创业团队需要怎样的组织承诺？",
+                    "kind": "问题",
+                    "summary": "持续追踪 AI 创业中的目标、责任和承诺如何对齐。",
+                    "core_claims": ["工具能力不能替代组织承诺。"],
+                    "evidence": ["访谈把长期执行列为关键条件。"],
+                    "counterpoints": ["不同阶段的组织形式可能不同。"],
+                    "connections": [],
+                    "people": ["Sam Altman"],
+                },
+                {
+                    "id": "K3",
+                    "title": "指数变化要求创业者重画目标边界",
+                    "kind": "方法",
+                    "summary": "先按未来能力重画目标，再选择关键路径。",
+                    "core_claims": ["目标应根据能力曲线重新设定。"],
+                    "evidence": ["访谈提出围绕未来能力寻找机会。"],
+                    "counterpoints": ["不能用远期能力替代当前验证。"],
+                    "connections": [],
+                    "people": ["Sam Altman"],
+                },
+            ],
+            "entities": [
+                {
+                    "name": "Sam Altman",
+                    "entity_type": "人物",
+                    "aliases": ["萨姆·奥特曼", "Sam"],
+                    "description": "AI 创业、组织与治理。",
+                    "viewpoints": ["AI 降低成本后，创业者应该扩大目标。"],
+                }
+            ],
+        }
+
+    def write_card(self, capture_id: str = "file:interview") -> Path:
+        review = self.review(capture_id)
+        item = {
+            "id": capture_id,
+            "file": ingest.rel(self.source),
+            "content": self.source.read_text(encoding="utf-8"),
+        }
+        card = ingest.write_review_card(review, item)
+        text = card.read_text(encoding="utf-8")
+        card.write_text(
+            text.replace(
+                "- [ ] 同时沉淀知识并加入候选选题",
+                "- [x] 同时沉淀知识并加入候选选题",
+            ),
+            encoding="utf-8",
+        )
+        return card
+
+    def test_review_card_keeps_all_units_and_entities_visible(self) -> None:
+        card = self.write_card()
+        text = card.read_text(encoding="utf-8")
+        meta = ingest.parse_frontmatter(text)
+
+        self.assertEqual(meta["knowledge_unit_count"], "3")
+        self.assertEqual(meta["entity_count"], "1")
+        self.assertEqual(
+            [item["kind"] for item in ingest.knowledge_units_from_card(text, meta)],
+            ["观点", "问题", "方法"],
+        )
+        self.assertIn("## 拟沉淀知识单元", text)
+        self.assertIn("### K2 · 问题 · AI 创业团队需要怎样的组织承诺？", text)
+        self.assertIn("### Sam Altman · 人物", text)
+
+    def test_same_capture_reuses_active_review_even_when_title_changes(self) -> None:
+        first = self.write_card("file:same-source")
+        changed = self.review("file:same-source")
+        changed["title"] = "模型换了一种标题表达"
+        item = {
+            "id": "file:same-source",
+            "file": ingest.rel(self.source),
+            "content": self.source.read_text(encoding="utf-8"),
+        }
+
+        second = ingest.write_review_card(changed, item)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(list(ingest.REVIEW_DIR.glob("*.md"))), 1)
+
+    def test_run_lock_prevents_overlapping_cycles(self) -> None:
+        state_home = self.vault / "state"
+        with (
+            patch.object(ingest, "STATE_HOME", state_home),
+            patch.object(ingest, "RUN_LOCK_FILE", state_home / "pipeline.lock"),
+        ):
+            first = ingest.acquire_run_lock()
+            self.assertIsNotNone(first)
+            try:
+                self.assertIsNone(ingest.acquire_run_lock())
+            finally:
+                first.close()
+            third = ingest.acquire_run_lock()
+            self.assertIsNotNone(third)
+            third.close()
+
+    def test_review_pending_processes_each_source_independently(self) -> None:
+        second_source = ingest.WEB_DIR / "第二份访谈.md"
+        second_source.write_text(
+            self.source.read_text(encoding="utf-8").replace("# 访谈", "# 第二份访谈"),
+            encoding="utf-8",
+        )
+        first_id = "file:" + ingest.rel(self.source)
+        second_id = "file:" + ingest.rel(second_source)
+        state = ingest.default_state()
+        state["pending_sources"] = [ingest.rel(self.source), ingest.rel(second_source)]
+        first_review = self.review(first_id)
+        second_review = self.review(second_id)
+        second_review["title"] = "第二份访谈的独立审核"
+
+        with patch.object(
+            ingest,
+            "run_codex",
+            side_effect=[
+                {"reviews": [first_review]},
+                {"reviews": [second_review]},
+            ],
+        ) as mocked:
+            count = ingest.review_pending(state, {})
+
+        self.assertEqual(count, 2)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(state["pending_sources"], [])
+
+    def test_oversized_source_stays_pending_without_truncation(self) -> None:
+        state = ingest.default_state()
+        state["pending_sources"] = [ingest.rel(self.source)]
+
+        with patch.object(ingest, "run_codex") as mocked:
+            count = ingest.review_pending(
+                state,
+                {"review_item_max_chars": 20, "review_batch_max_chars": 100},
+            )
+
+        self.assertEqual(count, 0)
+        self.assertEqual(state["pending_sources"], [ingest.rel(self.source)])
+        self.assertFalse(mocked.called)
+        self.assertIn("未截断", state["errors"][0]["message"])
+
+    def test_one_approval_creates_multiple_units_and_updates_one_person(self) -> None:
+        self.write_card()
+
+        result = ingest.process_review_actions()
+
+        self.assertEqual(result["both"], 1)
+        self.assertEqual(result["knowledge_notes"], 3)
+        self.assertEqual(len(list((ingest.KNOWLEDGE_DIR / "40-观点").glob("*.md"))), 1)
+        self.assertEqual(len(list((ingest.KNOWLEDGE_DIR / "30-问题").glob("*.md"))), 1)
+        self.assertEqual(len(list((ingest.KNOWLEDGE_DIR / "60-方法").glob("*.md"))), 1)
+        people = list((ingest.KNOWLEDGE_DIR / "20-人物与组织").glob("*.md"))
+        self.assertEqual([path.name for path in people], ["Sam Altman.md"])
+        profile = people[0].read_text(encoding="utf-8")
+        self.assertIn("萨姆·奥特曼", profile)
+        self.assertIn("AI 降低成本后，创业者应该扩大目标", profile)
+        self.assertIn("AI 创业团队需要怎样的组织承诺？]]", profile)
+        for folder in ("40-观点", "30-问题", "60-方法"):
+            note = next((ingest.KNOWLEDGE_DIR / folder).glob("*.md"))
+            self.assertIn("[[Sam Altman]]", note.read_text(encoding="utf-8"))
+        topic = next(ingest.TOPIC_DIR.glob("*.md"))
+        topic_meta = ingest.parse_frontmatter(topic.read_text(encoding="utf-8"))
+        self.assertEqual(len(ingest.meta_json_list(topic_meta, "knowledge_files_json")), 3)
+
+    def test_declared_entities_from_same_source_link_each_other(self) -> None:
+        review = self.review()
+        review["entities"].append(
+            {
+                "name": "OpenAI",
+                "entity_type": "公司",
+                "aliases": [],
+                "description": "Sam Altman 所在的 AI 公司。",
+                "viewpoints": [],
+            }
+        )
+        item = {
+            "id": review["id"],
+            "file": ingest.rel(self.source),
+            "content": self.source.read_text(encoding="utf-8"),
+        }
+        card = ingest.write_review_card(review, item)
+        card.write_text(
+            card.read_text(encoding="utf-8").replace(
+                "- [ ] 同时沉淀知识并加入候选选题",
+                "- [x] 同时沉淀知识并加入候选选题",
+            ),
+            encoding="utf-8",
+        )
+
+        ingest.process_review_actions()
+
+        sam = ingest.KNOWLEDGE_DIR / "20-人物与组织/Sam Altman.md"
+        openai = ingest.KNOWLEDGE_DIR / "20-人物与组织/OpenAI.md"
+        self.assertTrue(openai.exists())
+        self.assertIn("[[OpenAI]]", sam.read_text(encoding="utf-8"))
+        self.assertIn("[[Sam Altman]]", openai.read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "- 待补充",
+            ingest.markdown_section(openai.read_text(encoding="utf-8"), "相关人物"),
+        )
+
+    def test_alias_and_repeated_title_merge_without_numbered_duplicates(self) -> None:
+        first = ingest.ensure_entity_profile(
+            self.review()["entities"][0],
+            source_file=ingest.rel(self.source),
+            source_url="https://example.com/one",
+        )
+        second = ingest.ensure_entity_profile(
+            {
+                "name": "萨姆·奥特曼",
+                "entity_type": "人物",
+                "aliases": ["Sam Altman"],
+                "description": "新的描述",
+                "viewpoints": ["组织承诺需要长期兑现。"],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="https://example.com/two",
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            len(list((ingest.KNOWLEDGE_DIR / "20-人物与组织").glob("*.md"))),
+            1,
+        )
+        self.assertNotIn("（2）", second.name)
+        self.assertIn(
+            "组织承诺需要长期兑现",
+            second.read_text(encoding="utf-8"),
+        )
+
+    def test_descriptive_person_unit_becomes_knowledge_and_unknown_people_are_not_profiles(self) -> None:
+        review = self.review()
+        review["knowledge_units"] = [
+            {
+                "id": "K1",
+                "title": "Sam Altman 的 AI 创业实践",
+                "kind": "人物与组织",
+                "summary": "这是一条关于创业判断如何落到行动的完整案例。",
+                "core_claims": ["人物观点应该进入独立知识卡。"],
+                "evidence": ["原访谈给出了创业窗口和组织选择。"],
+                "counterpoints": ["个人经验不能直接推广到所有团队。"],
+                "connections": [],
+                "people": ["Sam Altman", "未声明的人名"],
+            }
+        ]
+        unit = ingest.normalized_knowledge_units(review, strict=True)[0]
+        self.assertEqual(unit["kind"], "案例")
+
+        note = ingest.create_knowledge_unit_note(
+            self.vault / "archive/review.md",
+            {
+                "capture_id": "source:person-case",
+                "source_file": ingest.rel(self.source),
+                "source_url": "https://example.com/interview",
+            },
+            unit,
+            review["entities"],
+        )
+
+        self.assertEqual(note.parent.name, "50-案例")
+        self.assertTrue((ingest.KNOWLEDGE_DIR / "20-人物与组织/Sam Altman.md").exists())
+        self.assertFalse(
+            (ingest.KNOWLEDGE_DIR / "20-人物与组织/未声明的人名.md").exists()
+        )
+
+    def test_primary_entity_name_wins_over_another_profiles_alias(self) -> None:
+        ingest.ensure_entity_profile(
+            {
+                "name": "杨植麟",
+                "entity_type": "人物",
+                "aliases": ["Kimi"],
+                "description": "创始人",
+                "viewpoints": [],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="",
+        )
+        company = ingest.ensure_entity_profile(
+            {
+                "name": "Moonshot AI",
+                "entity_type": "公司",
+                "aliases": ["Kimi"],
+                "description": "大模型公司",
+                "viewpoints": [],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="",
+        )
+        entities = ingest.normalized_entities(
+            {
+                "entities": [
+                    {
+                        "name": "杨植麟",
+                        "entity_type": "人物",
+                        "aliases": ["Kimi"],
+                        "description": "创始人",
+                        "viewpoints": [],
+                    },
+                    {
+                        "name": "Kimi",
+                        "entity_type": "产品",
+                        "aliases": [],
+                        "description": "产品",
+                        "viewpoints": [],
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(company.stem, "Moonshot AI")
+        self.assertEqual(entities[0]["aliases"], [])
+
+    def test_bilingual_person_name_resolves_to_one_stable_profile(self) -> None:
+        chinese = ingest.ensure_entity_profile(
+            {
+                "name": "埃隆·马斯克",
+                "entity_type": "人物",
+                "aliases": ["Elon Musk", "马斯克"],
+                "description": "企业家。",
+                "viewpoints": ["长期关注 AI 与机器人。"],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="",
+        )
+        english = ingest.ensure_entity_profile(
+            {
+                "name": "Elon Musk",
+                "entity_type": "人物",
+                "aliases": ["Musk"],
+                "description": "同一人物。",
+                "viewpoints": ["新来源补充的观点。"],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="",
+        )
+
+        self.assertEqual(english, chinese)
+        self.assertEqual(chinese.stem, "埃隆·马斯克")
+        self.assertTrue(
+            ingest.parse_frontmatter(chinese.read_text(encoding="utf-8"))[
+                "entity_id"
+            ].startswith("entity-")
+        )
+        self.assertEqual(
+            len(list((ingest.KNOWLEDGE_DIR / "20-人物与组织").glob("*.md"))),
+            1,
+        )
+
+    def test_entity_registry_keeps_known_products_and_people_separate(self) -> None:
+        person = ingest.canonicalize_entity(
+            {
+                "name": "@prototech_ai",
+                "entity_type": "人物",
+                "aliases": [],
+            }
+        )
+        model = ingest.canonicalize_entity(
+            {
+                "name": "Kimi K3",
+                "entity_type": "模型",
+                "aliases": ["Kimi"],
+            }
+        )
+        product = ingest.canonicalize_entity(
+            {
+                "name": "Claude",
+                "entity_type": "产品",
+                "aliases": ["Claude Code"],
+            }
+        )
+
+        self.assertEqual(person["name"], "Endless1936")
+        self.assertIn("@prototech_ai", person["aliases"])
+        self.assertNotIn("Kimi", model["aliases"])
+        self.assertNotIn("Claude Code", product["aliases"])
+
+    def test_company_product_and_model_are_type_aware_and_split_by_directory(self) -> None:
+        company = ingest.ensure_entity_profile(
+            {
+                "name": "Moonshot AI",
+                "entity_type": "公司",
+                "aliases": ["月之暗面", "Kimi"],
+                "description": "公司。",
+                "viewpoints": [],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="",
+        )
+        product = ingest.ensure_entity_profile(
+            {
+                "name": "Kimi",
+                "entity_type": "产品",
+                "aliases": [],
+                "description": "产品。",
+                "viewpoints": [],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="",
+        )
+        model = ingest.ensure_entity_profile(
+            {
+                "name": "Fable 5",
+                "entity_type": "产品",
+                "aliases": [],
+                "description": "模型。",
+                "viewpoints": ["用于任务编排。"],
+            },
+            source_file=ingest.rel(self.source),
+            source_url="",
+        )
+
+        self.assertEqual(company.parent.name, "20-人物与组织")
+        self.assertEqual(product.parent.name, "25-产品与模型")
+        self.assertEqual(product.stem, "Kimi")
+        self.assertEqual(model.parent.name, "25-产品与模型")
+        self.assertEqual(model.stem, "Claude Fable 5")
+        model_text = model.read_text(encoding="utf-8")
+        self.assertIn("entity_type: 模型", model_text)
+        self.assertIn("[[产品与模型索引]]", model_text)
+        self.assertNotIn('"Kimi"', company.read_text(encoding="utf-8").split("---", 2)[1])
+
+    def test_entity_layout_migration_merges_archives_rewrites_and_converges(self) -> None:
+        root = ingest.KNOWLEDGE_DIR / "20-人物与组织"
+        root.mkdir(parents=True, exist_ok=True)
+        common = """---
+kind: entity
+status: seed
+origin: test
+created_at: 2026-07-30
+updated_at: 2026-07-30
+entity_type: {entity_type}
+aliases: {aliases}
+source_url: "https://example.com/source"
+---
+
+# {name}
+
+## 关注主题
+
+测试对象。
+
+## 已提取观点
+
+- {point}
+
+## 对应知识卡
+
+- [[人物与思想索引]]
+
+## 相关人物
+
+- 待补充
+
+## 来源与边界
+
+- https://example.com/source
+"""
+        (root / "埃隆·马斯克.md").write_text(
+            common.format(
+                entity_type="人物",
+                aliases='["Elon Musk"]',
+                name="埃隆·马斯克",
+                point="中文主档案。",
+            ),
+            encoding="utf-8",
+        )
+        (root / "Elon Musk.md").write_text(
+            common.format(
+                entity_type="人物",
+                aliases='["Musk"]',
+                name="Elon Musk",
+                point="英文档案补充。",
+            ),
+            encoding="utf-8",
+        )
+        knowledge = ingest.KNOWLEDGE_DIR / "40-观点/测试观点.md"
+        knowledge.parent.mkdir(parents=True, exist_ok=True)
+        knowledge.write_text("# 测试观点\n\n- [[Elon Musk]]\n", encoding="utf-8")
+
+        result = ingest.migrate_entity_layout()
+
+        canonical = root / "埃隆·马斯克.md"
+        self.assertEqual(result["merges"], ["Elon Musk → 埃隆·马斯克"])
+        self.assertFalse((root / "Elon Musk.md").exists())
+        self.assertIn("英文档案补充", canonical.read_text(encoding="utf-8"))
+        self.assertIn("[[埃隆·马斯克]]", knowledge.read_text(encoding="utf-8"))
+        self.assertTrue(
+            any(
+                path.name == "Elon Musk.md"
+                for path in (ingest.VAULT / "90-归档/90-待清理").rglob("*.md")
+            )
+        )
+        rerun = ingest.migrate_entity_layout(dry_run=True)
+        self.assertEqual(rerun["merges"], [])
+        self.assertEqual(rerun["renames"], [])
+        self.assertEqual(rerun["moves"], [])
+
+    def test_same_knowledge_title_from_new_source_updates_existing_note(self) -> None:
+        unit = self.review()["knowledge_units"][0]
+        first = ingest.create_knowledge_unit_note(
+            self.vault / "archive/one.md",
+            {
+                "capture_id": "source:one",
+                "source_file": ingest.rel(self.source),
+                "source_url": "https://example.com/one",
+            },
+            unit,
+            self.review()["entities"],
+        )
+        second = ingest.create_knowledge_unit_note(
+            self.vault / "archive/two.md",
+            {
+                "capture_id": "source:two",
+                "source_file": ingest.rel(self.source),
+                "source_url": "https://example.com/two",
+            },
+            unit,
+            self.review()["entities"],
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            len(list((ingest.KNOWLEDGE_DIR / "40-观点").glob("*.md"))),
+            1,
+        )
+        meta = ingest.parse_frontmatter(first.read_text(encoding="utf-8"))
+        self.assertEqual(
+            len(ingest.meta_json_list(meta, "knowledge_unit_ids_json")),
+            2,
+        )
+
+    def test_mobile_read_failure_is_retained_as_source_health(self) -> None:
+        state = ingest.default_state()
+        with patch.object(
+            ingest,
+            "mobile_lines_with_status",
+            return_value=([], ["Resource deadlock avoided"]),
+        ):
+            ingest.sync_mobile(state, {})
+            ingest.sync_mobile(state, {})
+            ingest.sync_mobile(state, {})
+
+        mobile = state["source_health"]["mobile"]
+        self.assertEqual(mobile["status"], "degraded")
+        self.assertEqual(mobile["consecutive_failures"], 3)
+        self.assertIn("Resource deadlock", mobile["message"])
+
+    def test_reconcile_people_links_repairs_both_sides(self) -> None:
+        profile = ingest.ensure_entity_profile(
+            self.review()["entities"][0],
+            source_file=ingest.rel(self.source),
+            source_url="https://example.com/interview",
+        )
+        note = ingest.KNOWLEDGE_DIR / "40-观点/Sam 的新判断.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            """---
+kind: viewpoint
+status: seed
+source_file: "30-资料/40-网页剪藏/访谈.md"
+---
+
+# Sam 的新判断
+
+Sam Altman 认为创业者需要扩大目标。
+""",
+            encoding="utf-8",
+        )
+
+        result = ingest.reconcile_people_links()
+
+        self.assertEqual(result["linked_notes"], 1)
+        self.assertIn("[[Sam Altman]]", note.read_text(encoding="utf-8"))
+        self.assertIn(
+            "Sam 的新判断]]",
+            profile.read_text(encoding="utf-8"),
+        )
+
+    def test_declared_map_and_person_index_are_updated_without_duplicates(self) -> None:
+        map_dir = ingest.KNOWLEDGE_DIR / "70-知识地图"
+        map_dir.mkdir(parents=True, exist_ok=True)
+        agent_map = map_dir / "Agent 系统工程.md"
+        agent_map.write_text(
+            """---
+kind: map
+map_role: theme
+status: evergreen
+updated_at: 2026-07-01
+---
+
+# Agent 系统工程
+""",
+            encoding="utf-8",
+        )
+        people_map = map_dir / "人物与思想索引.md"
+        people_map.write_text(
+            """---
+kind: map
+map_role: object-index
+status: evergreen
+updated_at: 2026-07-01
+---
+
+# 人物与思想索引
+""",
+            encoding="utf-8",
+        )
+        unit = self.review()["knowledge_units"][0]
+        unit["connections"] = ["Agent 系统工程"]
+        note = ingest.create_knowledge_unit_note(
+            self.vault / "archive/review.md",
+            {
+                "capture_id": "source:map",
+                "source_file": ingest.rel(self.source),
+                "source_url": "https://example.com/interview",
+            },
+            unit,
+            self.review()["entities"],
+        )
+        ingest.connect_unit_to_declared_maps(note, unit)
+        linked_note = ingest.KNOWLEDGE_DIR / "30-问题/延伸问题.md"
+        linked_note.parent.mkdir(parents=True, exist_ok=True)
+        linked_note.write_text(
+            f"""---
+kind: question
+status: seed
+source_file: "{ingest.rel(self.source)}"
+---
+
+# 延伸问题
+
+## 知识连接
+
+- [[{note.stem}]]
+""",
+            encoding="utf-8",
+        )
+        result = ingest.reconcile_knowledge_links()
+
+        agent_text = agent_map.read_text(encoding="utf-8")
+        people_text = people_map.read_text(encoding="utf-8")
+        self.assertEqual(agent_text.count(f"[[{note.stem}]]"), 1)
+        self.assertEqual(agent_text.count("[[延伸问题]]"), 1)
+        self.assertEqual(people_text.count("[[Sam Altman]]"), 1)
+        self.assertEqual(result["graph_uncovered"], 0)
+
+    def test_declared_object_index_is_not_used_as_a_theme_map(self) -> None:
+        map_dir = ingest.KNOWLEDGE_DIR / "70-知识地图"
+        map_dir.mkdir(parents=True, exist_ok=True)
+        object_index = map_dir / "产品与模型索引.md"
+        object_index.write_text(
+            """---
+kind: map
+map_role: object-index
+status: evergreen
+---
+
+# 产品与模型索引
+""",
+            encoding="utf-8",
+        )
+        note = ingest.KNOWLEDGE_DIR / "10-概念/测试模型判断.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\nkind: concept\nstatus: seed\n---\n\n# 测试模型判断\n",
+            encoding="utf-8",
+        )
+
+        ingest.connect_unit_to_declared_maps(
+            note,
+            {"connections": ["产品与模型索引"]},
+        )
+
+        self.assertNotIn(
+            "[[测试模型判断]]",
+            object_index.read_text(encoding="utf-8"),
+        )
+
+    def test_archived_approved_review_can_be_backfilled_to_multiple_units(self) -> None:
+        capture_id = "file:legacy-interview"
+        archived = ingest.REVIEW_RECORD_DIR / "2026-07/legacy.md"
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        archived.write_text(
+            f"""---
+kind: capture-review
+status: 已沉淀
+suggested_kind: 观点
+source_file: "{ingest.rel(self.source)}"
+source_url: "https://example.com/interview"
+capture_id: "{capture_id}"
+review_action: knowledge
+action_processed_at: "2026-07-29T10:00:00-07:00"
+result_file: "20-知识/40-观点/旧结果.md"
+knowledge_file: "20-知识/40-观点/旧结果.md"
+---
+
+# 旧审核卡
+
+## 人工审核
+
+- [ ] 同时沉淀知识并加入候选选题
+- [x] 只沉淀为长期知识
+- [ ] 只加入候选选题
+- [ ] 暂缓
+- [ ] 标记为可恢复的待清理项
+""",
+            encoding="utf-8",
+        )
+        state = ingest.default_state()
+        state["reviewed_sources"][capture_id] = {
+            "source": ingest.rel(self.source),
+            "review": ingest.rel(archived),
+            "at": "2026-07-29T10:00:00-07:00",
+        }
+        review = self.review(capture_id)
+        with (
+            patch.object(
+                ingest,
+                "run_codex",
+                return_value={"reviews": [review]},
+            ),
+            patch.object(ingest, "save_state"),
+        ):
+            result = ingest.backfill_knowledge_v2(state, {}, limit=8)
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["knowledge_notes"], 3)
+        updated_meta = ingest.parse_frontmatter(
+            archived.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            len(ingest.meta_json_list(updated_meta, "knowledge_units_json")),
+            3,
+        )
+        self.assertEqual(
+            len(ingest.meta_json_list(updated_meta, "knowledge_files_json")),
+            3,
+        )
+        self.assertEqual(
+            len(list((ingest.KNOWLEDGE_DIR / "30-问题").glob("*.md"))),
+            1,
+        )
+
+
+class ContentPackContinuationTests(unittest.TestCase):
+    setUp = ContentPackTests.setUp
+    tearDown = ContentPackTests.tearDown
+    review_text = staticmethod(ContentPackTests.review_text)
 
     def test_stale_reserve_topic_requires_a_real_refresh_signal(self) -> None:
         ingest.TOPIC_RESERVE_DIR.mkdir(parents=True)

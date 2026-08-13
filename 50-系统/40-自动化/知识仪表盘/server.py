@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -19,7 +21,7 @@ import time
 import traceback
 import webbrowser
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,7 +29,20 @@ from urllib.parse import parse_qs, quote, urlparse
 
 
 HERE = Path(__file__).resolve().parent
-DASHBOARD_SCHEMA_VERSION = 6
+DASHBOARD_SCHEMA_VERSION = 8
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+# Surge Ponte 把 <设备名>.sgponte 在本机解析到 127.0.0.1，流量经 Ponte 隧道到达回环地址；
+# 能发起连接的只有同一 iCloud 账号下跑着 Surge 的自有设备，因此该后缀与本机地址同级放行。
+PONTE_SUFFIX = ".sgponte"
+# --tailnet 开启后加入本机的 Tailscale 地址与 MagicDNS 名；默认空集，行为与纯本机一致。
+EXTRA_ALLOWED_HOSTS: set[str] = set()
+TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
+TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+TAILSCALE_CLI_CANDIDATES = (
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+)
 SERVER_STARTED_AT = datetime.now().astimezone().isoformat(timespec="seconds")
 DEFAULT_VAULT = HERE.parents[2]
 VAULT = Path(os.environ.get("RAYS_BRAIN", str(DEFAULT_VAULT))).resolve()
@@ -40,6 +55,16 @@ DRAFT_WORKER_SCRIPT = HERE.parent / "AI执行" / "draft_worker.py"
 STATE_HOME = Path(
     os.environ.get("RAYS_BRAIN_STATE", str(Path.home() / ".local/state/rays-brain"))
 )
+TOPIC_MAP_CANDIDATE_STATE = STATE_HOME / "topic-map-candidates.json"
+TOPIC_MAP_CANDIDATE_NOTE_REL = "00-入口/10-工作台/主题地图候选.md"
+MAP_DIGEST_NOTE_REL = "00-入口/10-工作台/知识地图整理.md"
+if str(INGEST_SCRIPT.parent) not in sys.path:
+    sys.path.insert(0, str(INGEST_SCRIPT.parent))
+try:
+    from topic_map_candidates import apply_topic_map_candidate_action
+except ModuleNotFoundError:
+    def apply_topic_map_candidate_action(*_args, **_kwargs):
+        raise ValueError("主题地图判断需要先安装知识采集模块；工作台其他功能仍可使用")
 DEFAULT_LAYOUT = {
     "review_dir": "10-创作/10-灵感/10-待评估/剪藏复核",
     "topics_dir": "10-创作/10-灵感/20-候选选题",
@@ -165,6 +190,38 @@ def load_review_protocol() -> tuple[
 
 
 ACTION_LABELS, ACTION_ALIASES, ACTION_KEY_ALIASES, UI_ACTIONS = load_review_protocol()
+
+
+def load_topic_attention_days() -> int:
+    if not REVIEW_PROTOCOL_FILE.exists():
+        return 7
+    try:
+        data = json.loads(REVIEW_PROTOCOL_FILE.read_text(encoding="utf-8"))
+        days = int(data.get("topic_attention", {}).get("candidate_days", 7))
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        raise SystemExit(f"无法读取候选注意力期限：{REVIEW_PROTOCOL_FILE}（{exc}）")
+    if not 1 <= days <= 30:
+        raise SystemExit("候选注意力期限必须在 1–30 天之间")
+    return days
+
+
+TOPIC_ATTENTION_DAYS = load_topic_attention_days()
+
+
+def load_review_daily_limit() -> int:
+    if not REVIEW_PROTOCOL_FILE.exists():
+        return 3
+    try:
+        data = json.loads(REVIEW_PROTOCOL_FILE.read_text(encoding="utf-8"))
+        limit = int(data.get("review_attention", {}).get("daily_limit", 3))
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        raise SystemExit(f"无法读取每日审核上限：{REVIEW_PROTOCOL_FILE}（{exc}）")
+    if not 1 <= limit <= 10:
+        raise SystemExit("每日审核上限必须在 1–10 条之间")
+    return limit
+
+
+REVIEW_DAILY_LIMIT = load_review_daily_limit()
 # 协议缺失（降级模式）时用一个永不匹配的分支占位，勾选解析自然全部落空
 _ACTION_LABEL_PATTERN = "|".join(
     sorted((re.escape(label) for label in ACTION_ALIASES), key=len, reverse=True)
@@ -466,9 +523,14 @@ def review_card(path: Path) -> dict[str, object]:
         "recommendation": meta.get("recommendation", "待判断"),
         "confidence": meta.get("confidence", ""),
         "kind": meta.get("suggested_kind", ""),
+        "knowledge_unit_count": score_value(meta.get("knowledge_unit_count", "0")),
+        "entity_count": score_value(meta.get("entity_count", "0")),
         "status": meta.get("status", "未标记"),
         "source_url": meta.get("source_url", ""),
         "reviewed_at": reviewed_at,
+        "knowledge_auto_at": meta.get("knowledge_auto_at", ""),
+        "knowledge_auto_policy": meta.get("knowledge_auto_policy", ""),
+        "personal_context_status": meta.get("personal_context_status", ""),
         "selected_action": selected_action(text),
         "obsidian_uri": obsidian_uri(path),
     }
@@ -539,6 +601,15 @@ def load_runtime_state() -> dict[str, object]:
         return json.loads(read_text(state_file))
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def load_json_file(path: Path, default: object) -> object:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(read_text(path))
+    except (json.JSONDecodeError, OSError):
+        return default
 
 
 def recent_notes(files: list[Path], limit: int = 9) -> list[dict[str, object]]:
@@ -641,8 +712,32 @@ def has_topic_freshness_anchor(meta: dict[str, str]) -> bool:
     )
 
 
+def topic_attention_active(meta: dict[str, str], today: date | None = None) -> bool:
+    raw_until = meta.get("attention_until", "").strip().strip('"')
+    try:
+        attention_until = date.fromisoformat(raw_until) if raw_until else None
+    except ValueError:
+        attention_until = None
+    if attention_until is None:
+        raw_entered = (
+            meta.get("attention_entered_at", "").strip()
+            or meta.get("created_at", "").strip()
+            or meta.get("last_progress_at", "").strip()
+        )
+        match = re.search(r"\d{4}-\d{2}-\d{2}", raw_entered)
+        if not match:
+            return False
+        attention_until = date.fromisoformat(match.group(0)) + timedelta(
+            days=TOPIC_ATTENTION_DAYS
+        )
+    return bool(
+        meta.get("attention_status", "fresh").strip().lower() != "expired"
+        and (today or date.today()) < attention_until
+    )
+
+
 def load_topic_candidates(files: list[Path], limit: int = 40) -> list[dict[str, object]]:
-    today = date.today().isoformat()
+    today = date.today()
     return notes_under(
         files,
         area_prefix("topics_dir"),
@@ -650,9 +745,7 @@ def load_topic_candidates(files: list[Path], limit: int = 40) -> list[dict[str, 
         predicate=lambda item, meta: (
             meta.get("kind") == "topic-candidate"
             and meta.get("status") == "candidate"
-            and has_topic_freshness_anchor(meta)
-            and meta.get("freshness_status") == "fresh"
-            and meta.get("fresh_until", "") >= today
+            and topic_attention_active(meta, today)
         ),
         sort_key=lambda item: (
             int(item["priority_score"]),
@@ -838,7 +931,30 @@ def dashboard_payload() -> dict[str, object]:
     trend = load_snapshots()
     latest_snapshot = trend[-1] if trend else {}
     runtime = load_runtime_state()
+    topic_map_state = load_json_file(TOPIC_MAP_CANDIDATE_STATE, {})
+    topic_map_candidates = (
+        topic_map_state.get("candidates", [])
+        if isinstance(topic_map_state, dict)
+        else []
+    )
+    topic_map_observing = (
+        topic_map_state.get("observing", [])
+        if isinstance(topic_map_state, dict)
+        else []
+    )
     unresolved_errors = [item for item in runtime.get("errors", []) if not item.get("resolved_at")]
+    source_health = runtime.get("source_health", {})
+    degraded_sources = [
+        {
+            "source": str(key),
+            "label": str(value.get("label", key)),
+            "consecutive_failures": int(value.get("consecutive_failures", 0) or 0),
+            "last_failure_at": str(value.get("last_failure_at", "")),
+            "message": str(value.get("message", "")),
+        }
+        for key, value in source_health.items()
+        if isinstance(value, dict) and value.get("status") == "degraded"
+    ]
     pipeline_pending = len(runtime.get("pending_sources", []))
     try:
         # state.json 每轮采集都会保存，它的 mtime 就是管线最近一次活动时间
@@ -854,6 +970,8 @@ def dashboard_payload() -> dict[str, object]:
         for entry in (
             {"title": "健康日报", "path": "00-入口/20-日报/知识库健康日报/最新健康日报.md"},
             {"title": "知识库周报", "path": "00-入口/20-日报/知识库周报/最新知识库周报.md"},
+            {"title": "主题地图候选", "path": TOPIC_MAP_CANDIDATE_NOTE_REL},
+            {"title": "知识地图整理", "path": MAP_DIGEST_NOTE_REL},
         )
         if (VAULT / entry["path"]).is_file()
     ]
@@ -868,6 +986,15 @@ def dashboard_payload() -> dict[str, object]:
     if unresolved_errors:
         health = "red"
         health_reasons.append(f"有 {len(unresolved_errors)} 个采集错误待处理")
+    elif degraded_sources:
+        if any(item["consecutive_failures"] >= 3 for item in degraded_sources):
+            health = "red"
+        elif health == "green":
+            health = "yellow"
+        health_reasons.extend(
+            f"{item['label']}已连续 {item['consecutive_failures']} 轮读取失败"
+            for item in degraded_sources
+        )
     elif len(decision_pending) >= 10:
         health = "yellow"
         health_reasons.append(f"有 {len(decision_pending)} 张卡片等你判断")
@@ -887,8 +1014,8 @@ def dashboard_payload() -> dict[str, object]:
         if int(card["score"]) < 65 or card["recommendation"] == "清理"
     ]
     focus = (
-        f"先判断 {len(high_value)} 条高价值资料"
-        if high_value
+        f"今天先判断 {min(len(decision_pending), REVIEW_DAILY_LIMIT)} 条资料"
+        if decision_pending
         else f"从 {len(writing_tasks)} 个写作任务里推进一篇"
         if writing_tasks
         else f"从 {len(topic_candidates)} 个候选选题里挑一个立项"
@@ -916,10 +1043,12 @@ def dashboard_payload() -> dict[str, object]:
         "health": health,
         "health_reasons": health_reasons,
         "review_actions": UI_ACTIONS,
+        "review_daily_limit": REVIEW_DAILY_LIMIT,
         "board_protocol": client_board_protocol(),
         "pipeline": {
             "last_activity": pipeline_last_activity,
             "unresolved_errors": len(unresolved_errors),
+            "degraded_sources": len(degraded_sources),
             "pending": pipeline_pending,
         },
         "reports": reports,
@@ -941,6 +1070,7 @@ def dashboard_payload() -> dict[str, object]:
             ),
             "feedback": len(feedback),
             "feedback_pending": len(feedback_pending),
+            "topic_map_candidates": len(topic_map_candidates),
             "high_value": len(high_value),
             "low_value": len(low_value),
         },
@@ -954,6 +1084,13 @@ def dashboard_payload() -> dict[str, object]:
         "feedback": feedback,
         "recent": recent_notes(files),
         "knowledge_kinds": dict(knowledge_kinds.most_common()),
+        "topic_map_candidates": topic_map_candidates,
+        "topic_map_observing": topic_map_observing,
+        "topic_map_summary": (
+            topic_map_state.get("summary", {})
+            if isinstance(topic_map_state, dict)
+            else {}
+        ),
         "trend": trend,
         "latest_health_at": latest_snapshot.get("generated_at", ""),
         "inbox_uri": obsidian_uri(INBOX_FILE),
@@ -981,7 +1118,7 @@ def watch_signature() -> tuple:
     add(VAULT / LAYOUT["oral_scripts_dir"], "*.md", recursive=True)
     add(VAULT / LAYOUT["published_dir"], "*.md", recursive=True)
     add(STATE_HOME / "health-snapshots", "*.json")
-    for single in (INBOX_FILE, STATE_HOME / "state.json"):
+    for single in (INBOX_FILE, STATE_HOME / "state.json", TOPIC_MAP_CANDIDATE_STATE):
         try:
             parts.append((str(single), single.stat().st_mtime_ns))
         except OSError:
@@ -1054,6 +1191,8 @@ def choose_review_action(rel_path: str, action: str | None) -> dict[str, object]
         raise ValueError("这张卡已经处理，刷新后再试")
     if action is not None:
         action = ACTION_KEY_ALIASES.get(action, action)
+        if action == "topic" and meta.get("knowledge_auto_at"):
+            action = "both"
     if action is not None and action not in ACTION_LABELS:
         raise ValueError("不支持这个审核选择")
 
@@ -1072,6 +1211,27 @@ def choose_review_action(rel_path: str, action: str | None) -> dict[str, object]
         "label": ACTION_LABELS.get(action or "", "已撤销选择"),
         "path": rel_path,
     }
+
+
+def choose_topic_map_candidate(candidate_id: str, action: str) -> dict[str, object]:
+    if action not in {"approve", "watch", "dismiss"}:
+        raise ValueError("不支持这个主题地图候选动作")
+    result = apply_topic_map_candidate_action(
+        VAULT,
+        TOPIC_MAP_CANDIDATE_STATE,
+        candidate_id,
+        action,
+        VAULT / TOPIC_MAP_CANDIDATE_NOTE_REL,
+    )
+    log_operation(
+        {
+            "operation": "topic-map-candidate",
+            "candidate_id": candidate_id,
+            "action": action,
+            "map_file": result.get("map_file", ""),
+        }
+    )
+    return result
 
 
 CAPTURE_URL_PATTERN = re.compile(r"https?://[^\s<>\"）)】]+")
@@ -1285,6 +1445,25 @@ def apply_transition(
     updates: dict[str, str] = {"status": to_status}
     for key, value in {**group["set_on_change"], **transition["set"]}.items():
         updates[key] = resolve_set_value(value)
+    if meta.get("kind") == "topic-candidate":
+        if to_status == "candidate":
+            now = datetime.now().astimezone()
+            updates.update(
+                {
+                    "attention_entered_at": now.isoformat(timespec="seconds"),
+                    "attention_until": (
+                        now.date() + timedelta(days=TOPIC_ATTENTION_DAYS)
+                    ).isoformat(),
+                    "attention_status": "fresh",
+                    "review_after": (
+                        now.date() + timedelta(days=TOPIC_ATTENTION_DAYS)
+                    ).isoformat(),
+                    "closed_at": "",
+                    "closed_reason": "",
+                }
+            )
+        elif to_status in {"parked", "closed"}:
+            updates["attention_status"] = "inactive"
     atomic_write(path, update_frontmatter_text(text, updates))
     log_operation({"op": "transition", "path": rel, "from": from_status, "to": to_status})
     return {
@@ -1709,11 +1888,25 @@ def pipeline_status() -> dict[str, object]:
         )
     except OSError:
         pass
+    source_health = runtime.get("source_health", {})
+    degraded_sources = [
+        {
+            "source": str(key),
+            "label": str(value.get("label", key)),
+            "consecutive_failures": int(value.get("consecutive_failures", 0) or 0),
+            "last_failure_at": str(value.get("last_failure_at", "")),
+            "message": str(value.get("message", "")),
+        }
+        for key, value in source_health.items()
+        if isinstance(value, dict) and value.get("status") == "degraded"
+    ]
     return {
         "ok": True,
         "last_activity": last_activity,
         "pending_sources": len(runtime.get("pending_sources", [])),
         "errors": errors[-20:],
+        "source_health": source_health,
+        "degraded_sources": degraded_sources,
         "log_tail": tail,
         "manual_run_running": manual_run_running(),
         "manual_run_started_at": str(_MANUAL_RUN["started_at"]),
@@ -1725,6 +1918,45 @@ def pipeline_status() -> dict[str, object]:
     }
 
 
+def request_host(raw: str) -> str:
+    """从 Host 头取出主机名，兼容 `[IPv6]:端口` 与 `主机:端口` 两种写法。"""
+    value = (raw or "").strip().lower()
+    if value.startswith("["):
+        return value[1:].split("]", 1)[0]
+    return value.split(":", 1)[0]
+
+
+def is_tailnet_address(value: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return addr in TAILNET_V4 or addr in TAILNET_V6
+
+
+def detect_tailnet_identity() -> tuple[list[str], str | None]:
+    """通过 Tailscale CLI 读取本机 tailnet 地址与 MagicDNS 名；读不到就返回空。"""
+    for cli in TAILSCALE_CLI_CANDIDATES:
+        if not Path(cli).exists():
+            continue
+        try:
+            raw = subprocess.run(
+                [cli, "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout
+            self_info = json.loads(raw).get("Self") or {}
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            continue
+        ips = [ip for ip in self_info.get("TailscaleIPs") or [] if is_tailnet_address(ip)]
+        dns_name = (self_info.get("DNSName") or "").rstrip(".").lower() or None
+        if ips:
+            return ips, dns_name
+    return [], None
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "RaysBrainDashboard/1.0"
 
@@ -1733,16 +1965,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         super().log_message(format, *args)
 
+    @staticmethod
+    def host_allowed(host: str) -> bool:
+        return host in LOCAL_HOSTS or host in EXTRA_ALLOWED_HOSTS or host.endswith(PONTE_SUFFIX)
+
     def allowed_host(self) -> bool:
-        host = self.headers.get("Host", "").split(":", 1)[0].strip("[]").lower()
-        return host in {"127.0.0.1", "localhost", "::1"}
+        return self.host_allowed(request_host(self.headers.get("Host", "")))
 
     def local_origin(self) -> bool:
         origin = self.headers.get("Origin")
         if not origin:
             return True
         parsed = urlparse(origin)
-        return parsed.scheme == "http" and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        return self.host_allowed((parsed.hostname or "").lower())
 
     def send_common_headers(self, content_type: str, length: int) -> None:
         self.send_header("Content-Type", content_type)
@@ -1796,7 +2033,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/healthz":
             self.send_json(
-                {"ok": True, "vault": VAULT.name, "review_enabled": bool(ACTION_LABELS)}
+                {
+                    "ok": True,
+                    "vault": VAULT.name,
+                    "vault_path": str(VAULT),
+                    "review_enabled": bool(ACTION_LABELS),
+                }
             )
             return
         if parsed.path == "/api/dashboard":
@@ -1900,6 +2142,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if action is not None:
                     action = str(action)
                 self.send_json(choose_review_action(str(payload.get("path", "")), action))
+            elif parsed.path == "/api/topic-map-candidates/action":
+                self.send_json(
+                    choose_topic_map_candidate(
+                        str(payload.get("candidate_id", "")),
+                        str(payload.get("action", "")),
+                    )
+                )
             elif parsed.path == "/api/note/transition":
                 expected = payload.get("expected_mtime_ns")
                 if expected is not None:
@@ -1959,11 +2208,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.error_json("写入失败，请确认 iCloud 文件已经下载到本机", HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
-def run_server(host: str, port: int, open_browser: bool, quiet: bool = False) -> None:
+class ThreadingHTTPServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def start_tailnet_listeners(port: int, quiet: bool) -> list[ThreadingHTTPServer]:
+    """在本机的 Tailscale 地址上加开入口，只有 tailnet 内的设备（如手机）能连到。"""
+    ips, dns_name = detect_tailnet_identity()
+    if not ips:
+        print("未检测到 Tailscale（未安装或未运行），手机入口未开启；本机访问不受影响。")
+        return []
+    EXTRA_ALLOWED_HOSTS.update(ip.lower() for ip in ips)
+    if dns_name:
+        EXTRA_ALLOWED_HOSTS.add(dns_name)
+    listeners: list[ThreadingHTTPServer] = []
+    for ip in ips:
+        server_cls = ThreadingHTTPServerV6 if ":" in ip else ThreadingHTTPServer
+        try:
+            listener = server_cls((ip, port), DashboardHandler)
+        except OSError as exc:
+            print(f"tailnet 地址 {ip} 监听失败（{exc}），已跳过。")
+            continue
+        listener.quiet = quiet
+        threading.Thread(target=listener.serve_forever, daemon=True).start()
+        listeners.append(listener)
+    if listeners:
+        phone_host = dns_name or ips[0]
+        print(f"手机入口（需连接 Tailscale）：http://{phone_host}:{port}")
+    return listeners
+
+
+def run_server(
+    host: str, port: int, open_browser: bool, quiet: bool = False, tailnet: bool = False
+) -> None:
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     server.quiet = quiet
     url = f"http://{host}:{port}"
     print(f"Ray's Brain 知识仪表盘：{url}")
+    tailnet_listeners = start_tailnet_listeners(port, quiet) if tailnet else []
     print("按 Control+C 停止。")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
@@ -1973,6 +2255,8 @@ def run_server(host: str, port: int, open_browser: bool, quiet: bool = False) ->
         print("\n仪表盘已停止。")
     finally:
         server.server_close()
+        for listener in tailnet_listeners:
+            listener.server_close()
 
 
 def main() -> None:
@@ -1981,10 +2265,15 @@ def main() -> None:
     parser.add_argument("--port", default=8765, type=int)
     parser.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--tailnet",
+        action="store_true",
+        help="同时在本机的 Tailscale 地址上开手机入口（仅 tailnet 内设备可访问）",
+    )
     args = parser.parse_args()
     if args.host not in {"127.0.0.1", "localhost"}:
-        raise SystemExit("为保护私人笔记，仪表盘只允许监听本机地址。")
-    run_server(args.host, args.port, not args.no_open, args.quiet)
+        raise SystemExit("为保护私人笔记，仪表盘只允许监听本机地址；手机访问请用 --tailnet。")
+    run_server(args.host, args.port, not args.no_open, args.quiet, tailnet=args.tailnet)
 
 
 if __name__ == "__main__":

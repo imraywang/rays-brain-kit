@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+SCHEMA_VERSION = 2
+LAYOUT_NAME = "ray-content-v2"
 
 SKELETON_KEYS = (
     "review_dir",
@@ -79,6 +83,25 @@ def write_if_missing(vault: Path, relative: str, content: str, created: list[str
     created.append(relative)
 
 
+def write_manifest_if_missing(vault: Path, created: list[str]) -> None:
+    manifest_path = vault / ".ray-obsidian.json"
+    if manifest_path.exists():
+        return
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "layout": LAYOUT_NAME,
+        "name": vault.name or "我的知识库",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "managed_by": "rays-brain-kit",
+    }
+    write_if_missing(
+        vault,
+        ".ray-obsidian.json",
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        created,
+    )
+
+
 def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list[str]:
     created: list[str] = []
     for key in SKELETON_KEYS:
@@ -93,6 +116,7 @@ def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list
         "# 链接收件箱\n\n临时看到但来不及处理的链接放这里，每行一个：`- [ ] https://… 备注`。\n\n## 待处理\n",
         created,
     )
+    write_manifest_if_missing(vault, created)
     if demo:
         review = layout["review_dir"]
         write_if_missing(vault, f"{review}/演示卡-AI工作流.md", REVIEW_CARD.format(
@@ -112,7 +136,7 @@ def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list
             review_choices=review_choices(),
         ), created)
         write_if_missing(vault, f"{layout['topics_dir']}/演示候选-模型需要背景.md",
-            "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 94\nwriting_value_score: 97\nknowledge_value_score: 84\ntime_sensitivity: 常青\nsource_published_at: 2099-01-01\nfresh_until: 2099-12-31\nfreshness_status: fresh\n---\n\n# 新模型需要的不是命令，而是背景\n\n## 一句话判断\n\n演示数据：一个已经通过审核、可继续立项的候选选题。\n", created)
+            "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 94\nwriting_value_score: 97\nknowledge_value_score: 84\ntime_sensitivity: 常青\nsource_published_at: 2099-01-01\nfresh_until: 2099-12-31\nfreshness_status: fresh\nattention_entered_at: 2099-01-01\nattention_until: 2099-01-08\nattention_status: fresh\n---\n\n# 新模型需要的不是命令，而是背景\n\n## 一句话判断\n\n演示数据：一个已经通过审核、可继续立项的候选选题。\n", created)
         write_if_missing(vault, f"{layout['writing_tasks_dir']}/演示任务-知识管道.md",
             "---\nkind: writing-task\nstatus: active\npriority_score: 90\nwriting_value_score: 92\nknowledge_value_score: 80\ntimeliness: 中\n---\n\n# 写作任务：我的知识管道\n\n## 一句话判断\n\n演示数据：一个已经立项、等待推进的写作任务。\n", created)
         write_if_missing(vault, f"{layout['knowledge_dir']}/10-概念/演示-上下文工程.md",
