@@ -70,12 +70,18 @@ source_url: "https://example.com"
         self.record_script.write_text("# 测试占位\n", encoding="utf-8")
         template_root = self.vault / "50-系统/30-模板"
         template_root.mkdir(parents=True, exist_ok=True)
+        # 模板由发布归档脚本读取；skill 资产只带仪表盘目录，没有上游模板时用最小占位
         real_template_root = SERVER_PATH.parents[2] / "30-模板"
         for name in ("内容反馈.md", "口播视频反馈.md"):
-            (template_root / name).write_text(
-                (real_template_root / name).read_text(encoding="utf-8"),
-                encoding="utf-8",
+            source = real_template_root / name
+            content = (
+                source.read_text(encoding="utf-8")
+                if source.exists()
+                else "---\nkind: content-feedback\nstatus: pending\narticle: \"\"\n"
+                "platform: \"\"\nfeedback_stage: 24h\ndue_at: \"\"\n"
+                "feedback_24h_status: pending\nfeedback_7d_status: pending\n---\n\n# {{title}}\n"
             )
+            (template_root / name).write_text(content, encoding="utf-8")
         self.patchers = [
             mock.patch.object(dashboard, "VAULT", self.vault),
             mock.patch.object(dashboard, "REVIEW_DIR", self.review_dir),
@@ -879,6 +885,8 @@ source_url: "https://example.com"
     def test_record_publication_archives_and_backfills(self) -> None:
         draft, pack = self._write_publish_chain()
         real_script = Path(__file__).resolve().parent.parent / "发布归档/record_published.py"
+        if not real_script.exists():
+            self.skipTest("需要上游 发布归档/record_published.py，skill 资产不包含")
         with mock.patch.object(dashboard, "RECORD_SCRIPT", real_script):
             result = dashboard.record_publication(
                 "10-创作/30-文章草稿/草稿.md",
@@ -915,6 +923,8 @@ source_url: "https://example.com"
             encoding="utf-8",
         )
         real_script = Path(__file__).resolve().parent.parent / "发布归档/record_published.py"
+        if not real_script.exists():
+            self.skipTest("需要上游 发布归档/record_published.py，skill 资产不包含")
         with mock.patch.object(dashboard, "RECORD_SCRIPT", real_script):
             result = dashboard.record_publication(
                 "10-创作/30-文章草稿/草稿.md",
@@ -945,6 +955,8 @@ source_url: "https://example.com"
     def test_record_publication_accepts_optional_url_and_time(self) -> None:
         draft, pack = self._write_publish_chain()
         real_script = Path(__file__).resolve().parent.parent / "发布归档/record_published.py"
+        if not real_script.exists():
+            self.skipTest("需要上游 发布归档/record_published.py，skill 资产不包含")
         with mock.patch.object(dashboard, "RECORD_SCRIPT", real_script):
             result = dashboard.record_publication(
                 "10-创作/30-文章草稿/草稿.md", "x", "", ""
