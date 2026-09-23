@@ -89,7 +89,8 @@ class DraftWorkerTests(unittest.TestCase):
         self.assertIn("generated_by: codex-gpt-5.5", text)
         self.assertIn("content_pack:", text)
         self.assertIn("# 一篇测试草稿", text)
-        self.assertIn("## 待人工确认", text)
+        self.assertIn("## 待确认", text)
+        self.assertIn("publish_exclude_sections: 待确认", text)
         self.assertIn("- [ ] 缺一个亲历案例", text)
 
         worker.update_task(self.task, draft)

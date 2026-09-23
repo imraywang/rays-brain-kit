@@ -74,7 +74,7 @@ DEFAULT_LAYOUT = {
     "create_dir": "10-创作",
     "writing_tasks_dir": "10-创作/20-写作任务",
     "drafts_dir": "10-创作/30-文章草稿",
-    "oral_scripts_dir": "10-创作/20-口播草稿",
+    "oral_scripts_dir": "10-创作/25-口播草稿",
     "knowledge_dir": "20-知识",
     "sources_dir": "30-资料",
     "published_dir": "40-发布",
@@ -836,14 +836,10 @@ def load_drafts(files: list[Path], limit: int = 40) -> list[dict[str, object]]:
 
 
 COMPLETED_FEEDBACK_STATUSES = {
-    "reviewed",
     "complete",
-    "completed",
-    "closed",
-    "done",
-    "已复盘",
-    "已完成",
-    "已关闭",
+    "not-needed",
+    # 只保留旧卡兼容；新写入统一使用 complete / not-needed。
+    "reviewed", "completed", "closed", "done", "已复盘", "已完成", "已关闭",
 }
 
 
@@ -1741,13 +1737,11 @@ def find_published_by_content_id(content_id: str) -> Path | None:
 def record_publication(
     rel_path: str, platform: str, url: str, published_at: str
 ) -> dict[str, object]:
-    """登记一次已完成的公开发布：确保正式稿存在 → 跑发布归档脚本 → 回写草稿与成稿包。"""
+    """登记一次已完成的公开发布，并让发布归档脚本统一完成整条链的收尾。"""
     if platform not in PUBLISH_PLATFORMS:
         raise ValueError("不支持这个平台")
     url = url.strip()
     published_at = published_at.strip()
-    if not url or not published_at:
-        raise ValueError("公开链接和发布时间都不能为空")
     path = vault_note_path(rel_path)
     rel = relative(path)
     meta = parse_frontmatter(read_text(path))
@@ -1778,6 +1772,20 @@ def record_publication(
             atomic_write(target, text)
             article = target
             created_article = True
+        else:
+            # 旧正式稿可能早于 draft_source/content_pack 这两个字段出现。先把来源链补齐，
+            # 后面的统一收尾才能移动真正的母稿和成稿包，而不是只登记平台链接。
+            article_text = read_text(article)
+            article_meta = parse_frontmatter(article_text)
+            link_updates: dict[str, str] = {}
+            if not wikilink_body(article_meta.get("draft_source", "")):
+                link_updates["draft_source"] = f"[[{rel[:-3]}]]"
+            if meta.get("content_pack", "") and not wikilink_body(
+                article_meta.get("content_pack", "")
+            ):
+                link_updates["content_pack"] = meta["content_pack"]
+            if link_updates:
+                atomic_write(article, update_frontmatter_text(article_text, link_updates))
     if not RECORD_SCRIPT.is_file():
         raise ValueError("找不到发布归档脚本")
     env = {**os.environ, "RAYS_BRAIN": str(VAULT)}
@@ -1807,41 +1815,6 @@ def record_publication(
         lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
         raise ValueError(f"登记失败：{(lines[-1] if lines else '未知错误')[:300]}")
     report = [line.rstrip() for line in completed.stdout.splitlines()]
-    updated: list[str] = []
-    if article != path:
-        try:
-            atomic_write(
-                path,
-                update_frontmatter_text(
-                    read_text(path),
-                    {
-                        "status": "published",
-                        "published_file": f"[[{relative(article)[:-3]}]]",
-                    },
-                ),
-            )
-            updated.append(rel)
-        except (OSError, ValueError):
-            pass
-        pack_target = wikilink_body(meta.get("content_pack", ""))
-        pack = resolve_wikilink(pack_target) if pack_target else None
-        if pack is not None:
-            try:
-                pack_meta = parse_frontmatter(read_text(pack))
-                if pack_meta.get("status", "").strip() != "published":
-                    atomic_write(
-                        pack,
-                        update_frontmatter_text(
-                            read_text(pack),
-                            {
-                                "status": "published",
-                                "published_file": f"[[{relative(article)[:-3]}]]",
-                            },
-                        ),
-                    )
-                    updated.append(relative(pack))
-            except (OSError, ValueError):
-                pass
     log_operation(
         {
             "op": "record-publish",
@@ -1856,7 +1829,7 @@ def record_publication(
         "ok": True,
         "article": relative(article),
         "created_article": created_article,
-        "updated": updated,
+        "updated": [],
         "report": report[-30:],
     }
 

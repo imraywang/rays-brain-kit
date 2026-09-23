@@ -40,7 +40,7 @@ class CreationHealthTests(unittest.TestCase):
         health.TOPIC_RESERVE_DIR = health.VAULT / "10-创作/10-灵感/90-选题储备"
         health.WRITING_TASK_DIR = health.VAULT / "10-创作/20-写作任务"
         health.ARTICLE_DRAFT_DIR = health.VAULT / "10-创作/30-文章草稿"
-        health.ORAL_DRAFT_DIR = health.VAULT / "10-创作/20-口播草稿"
+        health.ORAL_DRAFT_DIR = health.VAULT / "10-创作/25-口播草稿"
         health.CONTENT_FEEDBACK_DIR = health.VAULT / "40-发布/00-内容反馈"
         health.REVIEW_DIR = health.VAULT / "10-创作/10-灵感/10-待评估/剪藏复核"
         health.KNOWLEDGE_DIR = health.VAULT / "20-知识"
@@ -275,19 +275,19 @@ freshness_status: stale
             self.note("kind: content-pack\nstatus: published", "任务"),
         )
         self.write(
-            "10-创作/20-口播草稿/旧口播.md",
+            "10-创作/25-口播草稿/旧口播.md",
             self.note("kind: oral-script\nstatus: recorded", "口播"),
         )
         self.write(
             "40-发布/50-口播视频/旧视频.md",
             self.note(
                 'kind: video-published\nstatus: published\n'
-                'oral_script: "[[10-创作/20-口播草稿/旧口播]]"',
+                'oral_script: "[[10-创作/25-口播草稿/旧口播]]"',
                 "正式视频逐字稿",
             ),
         )
         self.write(
-            "10-创作/20-口播草稿/已录未发.md",
+            "10-创作/25-口播草稿/已录未发.md",
             self.note("kind: oral-script\nstatus: recorded", "不应收尾"),
         )
 
@@ -297,8 +297,8 @@ freshness_status: stale
         files = {item["file"] for item in issues}
         self.assertIn("10-创作/30-文章草稿/母稿.md", files)
         self.assertIn("10-创作/20-写作任务/任务.md", files)
-        self.assertIn("10-创作/20-口播草稿/旧口播.md", files)
-        self.assertNotIn("10-创作/20-口播草稿/已录未发.md", files)
+        self.assertIn("10-创作/25-口播草稿/旧口播.md", files)
+        self.assertNotIn("10-创作/25-口播草稿/已录未发.md", files)
         reasons = health.creation_alerts({
             "active_candidate_count": 0,
             "stale_candidate_count": 0,
@@ -467,12 +467,7 @@ freshness_status: stale
         self.assertEqual([item["file"] for item in coverage], [
             "20-知识/10-概念/未覆盖.md"
         ])
-        publication = health.published_metadata_issues()
-        self.assertEqual(len(publication), 1)
-        self.assertEqual(
-            publication[0]["missing"],
-            ["公众号准确发布时间", "公众号公开链接"],
-        )
+        self.assertEqual(health.published_metadata_issues(), [])
 
     def test_candidate_knowledge_must_be_active_and_map_links_match_exactly(self) -> None:
         self.write(
@@ -886,7 +881,7 @@ class ReportRetentionTests(unittest.TestCase):
 
 
 class PublishedMetadataTests(unittest.TestCase):
-    """发布信息待补要两个平台一视同仁：只在 X 上发的文章原来一篇也点不出来。"""
+    """链接和时间可选；只拦截已经填写却明显错误的平台地址。"""
 
     EDITOR_URL = "https://x.com/compose/articles/edit/2079080041305276416"
     PUBLIC_URL = "https://x.com/wangray/status/2079091643693863273"
@@ -911,12 +906,12 @@ class PublishedMetadataTests(unittest.TestCase):
             f"---\n{frontmatter.strip()}\n---\n\n正文。\n", encoding="utf-8"
         )
 
-    def missing_fields(self) -> list[str]:
+    def issue_fields(self) -> list[str]:
         issues = health.published_metadata_issues()
         self.assertLessEqual(len(issues), 1)
-        return issues[0]["missing"] if issues else []
+        return issues[0]["issues"] if issues else []
 
-    def test_x_article_without_a_public_link_is_flagged(self) -> None:
+    def test_x_article_without_a_public_link_is_clean(self) -> None:
         self.write_article(
             "缺链接.md",
             """
@@ -925,9 +920,9 @@ x_article_status: published
 x_article_published_at: 2026-07-19T23:30:50-07:00
 """,
         )
-        self.assertEqual(self.missing_fields(), ["X Article 公开链接"])
+        self.assertEqual(health.published_metadata_issues(), [])
 
-    def test_x_article_without_a_publish_time_is_flagged(self) -> None:
+    def test_x_article_without_a_publish_time_is_clean(self) -> None:
         self.write_article(
             "缺时间.md",
             f"""
@@ -936,7 +931,7 @@ x_article_status: published
 x_article_url: "{self.PUBLIC_URL}"
 """,
         )
-        self.assertEqual(self.missing_fields(), ["X Article 准确发布时间"])
+        self.assertEqual(health.published_metadata_issues(), [])
 
     def test_a_draft_editor_url_does_not_pass_as_a_public_link(self) -> None:
         """填了草稿编辑器地址就不算空，不拦下来这篇就永远显得信息齐全。"""
@@ -950,7 +945,7 @@ x_article_published_at: 2026-07-19T23:30:50-07:00
 """,
         )
         self.assertEqual(
-            self.missing_fields(), ["X Article 公开链接（当前填的是草稿编辑器地址）"]
+            self.issue_fields(), ["X Article 链接当前填的是草稿编辑器地址"]
         )
 
     def test_a_complete_x_article_is_clean(self) -> None:
@@ -976,7 +971,7 @@ x_article_status: draft
         )
         self.assertEqual(health.published_metadata_issues(), [])
 
-    def test_both_platforms_are_reported_on_the_same_article(self) -> None:
+    def test_both_platforms_may_omit_optional_metadata(self) -> None:
         self.write_article(
             "两边都缺.md",
             """
@@ -985,18 +980,9 @@ x_article_status: published
 wechat_status: published
 """,
         )
-        self.assertEqual(
-            self.missing_fields(),
-            [
-                "X Article 准确发布时间",
-                "X Article 公开链接",
-                "公众号准确发布时间",
-                "公众号公开链接",
-            ],
-        )
+        self.assertEqual(health.published_metadata_issues(), [])
 
-    def test_an_empty_string_counts_as_missing(self) -> None:
-        """库里真实存在的形状：字段建了但值是 ""，不能当成已填。"""
+    def test_empty_strings_are_valid_optional_metadata(self) -> None:
         self.write_article(
             "空字符串.md",
             """
@@ -1006,9 +992,30 @@ wechat_public_url: ""
 wechat_published_at: ""
 """,
         )
-        self.assertEqual(
-            self.missing_fields(), ["公众号准确发布时间", "公众号公开链接"]
+        self.assertEqual(health.published_metadata_issues(), [])
+
+    def test_creator_backend_url_is_still_flagged(self) -> None:
+        self.write_article(
+            "后台地址.md",
+            """
+kind: video-published
+douyin_status: published
+douyin_url: "https://creator.douyin.com/creator-micro/content/manage"
+""",
         )
+        self.assertEqual(
+            self.issue_fields(), ["抖音链接当前填的是创作者后台地址"]
+        )
+
+    def test_published_item_without_a_platform_is_flagged(self) -> None:
+        self.write_article(
+            "平台未知.md",
+            """
+kind: video-published
+status: published
+""",
+        )
+        self.assertEqual(self.issue_fields(), ["尚未确认具体发布平台"])
 
 
 class EntityIdentityHealthTests(unittest.TestCase):

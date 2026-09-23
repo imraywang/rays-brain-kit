@@ -1597,6 +1597,21 @@ Sam Altman 谈创业、组织和仍未回答的问题。
         self.assertFalse(mocked.called)
         self.assertIn("未截断", state["errors"][0]["message"])
 
+    def test_processed_source_is_removed_without_another_model_call(self) -> None:
+        self.source.write_text(
+            self.source.read_text(encoding="utf-8").replace(
+                "processing_status: unprocessed", "processing_status: processed"
+            ),
+            encoding="utf-8",
+        )
+        state = ingest.default_state()
+        state["pending_sources"] = [ingest.rel(self.source)]
+        with patch.object(ingest, "run_codex") as mocked:
+            count = ingest.review_pending(state, {})
+        self.assertEqual(count, 0)
+        self.assertEqual(state["pending_sources"], [])
+        self.assertFalse(mocked.called)
+
     def test_one_approval_creates_multiple_units_and_updates_one_person(self) -> None:
         self.write_card()
 
@@ -2565,12 +2580,20 @@ class XArticlePublishDetectTests(unittest.TestCase):
         }
         ingest.VAULT = self.root
         ingest.ARTICLE_DRAFT_DIR = self.root / "10-创作/30-文章草稿"
-        ingest.ORAL_DRAFT_DIR = self.root / "10-创作/20-口播草稿"
+        ingest.ORAL_DRAFT_DIR = self.root / "10-创作/25-口播草稿"
         ingest.PUBLISHED_ROOT = self.root / "40-发布"
         ingest.LOG_DIR = self.root / "logs"
         ingest.ARTICLE_DRAFT_DIR.mkdir(parents=True)
         ingest.ORAL_DRAFT_DIR.mkdir(parents=True)
         (self.root / "40-发布/10-X长文").mkdir(parents=True)
+        template_root = self.root / "50-系统/30-模板"
+        template_root.mkdir(parents=True, exist_ok=True)
+        real_template_root = Path(ingest.RECORD_PUBLISHED_SCRIPT).parents[2] / "30-模板"
+        for name in ("内容反馈.md", "口播视频反馈.md"):
+            (template_root / name).write_text(
+                (real_template_root / name).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
         self.now = datetime.now().astimezone()
 
     def tearDown(self) -> None:
@@ -2721,10 +2744,12 @@ class XArticlePublishDetectTests(unittest.TestCase):
 
     def test_detected_publication_archives_records_and_closes_gate(self) -> None:
         draft = self.write_draft(with_pack=True)
+        pack = self.root / "10-创作/20-写作任务/测试成稿包.md"
         result, _ = self.detect(
             [self.article_post("多智能体怎么分工：一份可直接用的模板", 1)]
         )
         self.assertEqual(result["published"], 1, result)
+        self.assertEqual(result["errors"], 0, result)
 
         article = self.root / "40-发布/10-X长文/2026-07-27-测试长文.md"
         self.assertTrue(article.is_file())
@@ -2736,15 +2761,23 @@ class XArticlePublishDetectTests(unittest.TestCase):
             article_text,
         )
 
-        draft_text = draft.read_text(encoding="utf-8")
-        self.assertIn("x_article_status: published", draft_text)
-        self.assertIn("status: published", draft_text)
+        self.assertFalse(draft.exists())
+        self.assertFalse(pack.exists())
+        archived_drafts = list(
+            (self.root / "90-归档/30-创作记录/旧文章草稿").rglob(draft.name)
+        )
+        archived_packs = list(
+            (self.root / "90-归档/30-创作记录/旧成稿包").rglob(pack.name)
+        )
+        self.assertEqual(len(archived_drafts), 1)
+        self.assertEqual(len(archived_packs), 1)
+
+        draft_text = archived_drafts[0].read_text(encoding="utf-8")
+        self.assertIn("status: archived", draft_text)
         self.assertIn('published_file: "[[40-发布/10-X长文/2026-07-27-测试长文]]"', draft_text)
 
-        pack_text = (self.root / "10-创作/20-写作任务/测试成稿包.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("status: published", pack_text)
+        pack_text = archived_packs[0].read_text(encoding="utf-8")
+        self.assertIn("status: archived", pack_text)
         self.assertIn('published_file: "[[40-发布/10-X长文/2026-07-27-测试长文]]"', pack_text)
 
         self.assertTrue(list((self.root / "40-发布/00-内容反馈").glob("*.md")))
@@ -2791,11 +2824,19 @@ class XArticlePublishDetectTests(unittest.TestCase):
         result, calls = self.detect([])
         self.assertEqual(calls, [])
         self.assertEqual(result["reconciled"], 1)
-        draft_text = draft.read_text(encoding="utf-8")
-        self.assertIn("x_article_status: published", draft_text)
-        self.assertIn(
-            'x_article_url: "https://x.com/tester/status/2082000000000000009"', draft_text
+        self.assertEqual(result["errors"], 0)
+        self.assertFalse(draft.exists())
+        archived = list(
+            (self.root / "90-归档/30-创作记录/旧文章草稿").rglob(draft.name)
         )
+        self.assertEqual(len(archived), 1)
+        draft_text = archived[0].read_text(encoding="utf-8")
+        self.assertIn("status: archived", draft_text)
+        self.assertIn(
+            'published_file: "[[40-发布/10-X长文/正式稿]]"', draft_text
+        )
+        article_text = article.read_text(encoding="utf-8")
+        self.assertIn("90-归档/30-创作记录/旧文章草稿", article_text)
 
 
 if __name__ == "__main__":

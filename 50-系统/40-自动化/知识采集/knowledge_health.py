@@ -43,7 +43,7 @@ CANDIDATE_DIR = VAULT / "10-创作/10-灵感/20-候选选题"
 TOPIC_RESERVE_DIR = VAULT / "10-创作/10-灵感/90-选题储备"
 WRITING_TASK_DIR = VAULT / "10-创作/20-写作任务"
 ARTICLE_DRAFT_DIR = VAULT / "10-创作/30-文章草稿"
-ORAL_DRAFT_DIR = VAULT / "10-创作/20-口播草稿"
+ORAL_DRAFT_DIR = VAULT / "10-创作/25-口播草稿"
 CONTENT_FEEDBACK_DIR = VAULT / "40-发布/00-内容反馈"
 X_DIR = VAULT / "30-资料/30-X书签"
 WEB_DIR = VAULT / "30-资料/40-网页剪藏"
@@ -793,6 +793,7 @@ BACKEND_URL_MARKS = {
 
 
 def published_metadata_issues() -> list[dict[str, Any]]:
+    """平台名称必须确认；链接和发布时间可选，但已填写的资料必须合法。"""
     issues: list[dict[str, Any]] = []
     published_dir = VAULT / "40-发布"
     if not published_dir.exists():
@@ -803,40 +804,32 @@ def published_metadata_issues() -> list[dict[str, Any]]:
         meta = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
         if meta.get("kind") not in PUBLISHED_KINDS:
             continue
-        missing: list[str] = []
-        # 每个平台各查各的字段。这里原来只查公众号，于是只在 X 上发的文章一篇也点
-        # 不出来——而那正是发布归档写的三个字段，写漏了也没人发现。口播视频一次发
-        # 三个平台，同样是一个平台一组字段，漏掉哪个都要点出来。
+        problems: list[str] = []
+        published_status_keys = (
+            "x_article_status", "wechat_status", "shipinhao_status",
+            "douyin_status", "xiaohongshu_status",
+        )
+        if meta.get("status", "").strip() == "published" and not any(
+            meta.get(key, "").strip() == "published" for key in published_status_keys
+        ):
+            problems.append("尚未确认具体发布平台")
+        # 发布事实由各平台 status 决定。链接和时间是可选的追溯资料；留空不影响
+        # 发布状态，但一旦填写成草稿编辑器或创作者后台地址，仍要指出。
         if meta.get("x_article_status") == "published":
-            if not meta.get("x_article_published_at", "").strip():
-                missing.append("X Article 准确发布时间")
             x_url = meta.get("x_article_url", "").strip()
-            if not x_url:
-                missing.append("X Article 公开链接")
-            elif "compose/articles/edit" in x_url:
+            if x_url and "compose/articles/edit" in x_url:
                 # 草稿编辑器地址填在这里，这篇就永远显得既已发布又信息齐全。
-                missing.append("X Article 公开链接（当前填的是草稿编辑器地址）")
-        if meta.get("wechat_status") == "published":
-            if not meta.get("wechat_published_at", "").strip():
-                missing.append("公众号准确发布时间")
-            if not meta.get("wechat_public_url", "").strip():
-                missing.append("公众号公开链接")
+                problems.append("X Article 链接当前填的是草稿编辑器地址")
         for prefix, label in VIDEO_PLATFORM_LABELS.items():
             if meta.get(f"{prefix}_status") != "published":
                 continue
-            if not meta.get(f"{prefix}_published_at", "").strip():
-                missing.append(f"{label}准确发布时间")
             url = meta.get(f"{prefix}_url", "").strip()
-            if not url:
-                # 视频号确实常常没有可分享地址，但那时要填「无公开链接」这个
-                # 字面量。留空只代表还没填，两者必须分得开。
-                missing.append(f"{label}公开链接")
-            elif BACKEND_URL_MARKS.get(prefix, "") and BACKEND_URL_MARKS[prefix] in url:
-                missing.append(f"{label}公开链接（当前填的是创作者后台地址）")
-        if missing:
+            if url and BACKEND_URL_MARKS.get(prefix, "") and BACKEND_URL_MARKS[prefix] in url:
+                problems.append(f"{label}链接当前填的是创作者后台地址")
+        if problems:
             issues.append({
                 "file": path.relative_to(VAULT).as_posix(),
-                "missing": missing,
+                "issues": problems,
             })
     return issues
 
@@ -1037,6 +1030,7 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
 
     pending_feedback = 0
     overdue_feedback: list[dict[str, Any]] = []
+    feedback_schedule_issues: list[dict[str, str]] = []
     for path in markdown_notes(CONTENT_FEEDBACK_DIR):
         text = path.read_text(encoding="utf-8", errors="replace")
         meta = parse_frontmatter(text)
@@ -1053,6 +1047,16 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
             ("due_at", "due_date", "feedback_due_at", "review_due_at", "feedback_due"),
             now,
         )
+        if not meta.get("platform", "").strip():
+            feedback_schedule_issues.append({
+                "file": path.relative_to(VAULT).as_posix(),
+                "issue": "发布平台待确认",
+            })
+        elif not due:
+            feedback_schedule_issues.append({
+                "file": path.relative_to(VAULT).as_posix(),
+                "issue": "缺少下一次复盘日期",
+            })
         if status in {"overdue", "已逾期", "逾期"} or (due and due < now):
             overdue_feedback.append({
                 "file": path.relative_to(VAULT).as_posix(),
@@ -1114,6 +1118,8 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
         "pending_feedback_count": pending_feedback,
         "overdue_feedback_count": len(overdue_feedback),
         "overdue_feedback": overdue_feedback,
+        "feedback_schedule_issue_count": len(feedback_schedule_issues),
+        "feedback_schedule_issues": feedback_schedule_issues,
         "processed_review_in_active_count": len(processed_reviews_in_active),
         "processed_reviews_in_active": processed_reviews_in_active,
         "underlinked_knowledge_count": len(underlinked_knowledge),
@@ -1177,6 +1183,10 @@ def creation_alerts(metrics: dict[str, Any]) -> list[str]:
         reasons.append(
             f"有 {metrics['overdue_feedback_count']} 条到期反馈尚未复盘"
         )
+    if metrics.get("feedback_schedule_issue_count", 0):
+        reasons.append(
+            f"有 {metrics['feedback_schedule_issue_count']} 条待反馈内容缺少平台或复盘日期"
+        )
     if metrics["processed_review_in_active_count"]:
         reasons.append(
             "活跃审核目录混入 "
@@ -1212,7 +1222,7 @@ def creation_alerts(metrics: dict[str, Any]) -> list[str]:
         )
     if metrics.get("published_metadata_issue_count", 0):
         reasons.append(
-            f"有 {metrics['published_metadata_issue_count']} 篇已发布内容缺少平台公开信息"
+            f"有 {metrics['published_metadata_issue_count']} 篇已发布内容的平台资料待确认或填写不正确"
         )
     if metrics.get("published_active_residue_count", 0):
         reasons.append(
@@ -1830,7 +1840,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         f"| 主题地图候选 | {metrics.get('topic_map_candidate_count', 0)} | 只提醒，不自动建图 |",
         f"| 观察中的主题 | {metrics.get('topic_map_observing_count', 0)} | 等待更多来源或知识增长 |",
         f"| 未进入主题地图 | {metrics.get('knowledge_map_coverage_issue_count', 0)} | 对象索引和总目录不计入主题覆盖 |",
-        f"| 发布信息待补 | {metrics.get('published_metadata_issue_count', 0)} | 已发布平台的公开链接与时间应可追溯 |",
+        f"| 发布资料异常 | {metrics.get('published_metadata_issue_count', 0)} | 链接和时间可选；只检查已填写资料是否明显错误 |",
         f"| 发布后未收尾 | {metrics.get('published_active_residue_count', 0)} | 已发布的母稿、口播稿和成稿包应退出活跃目录 |",
         "",
         "## 主题地图候选",
@@ -1897,6 +1907,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         ("过期或超期候选", metrics.get("overdue_candidates", [])),
         ("新鲜度资料不全", metrics.get("topic_freshness_missing", [])),
         ("到期未复盘", metrics.get("overdue_feedback", [])),
+        ("反馈安排缺项", metrics.get("feedback_schedule_issues", [])),
         ("活跃审核目录中的已处理卡", metrics.get("processed_reviews_in_active", [])),
         ("对象档案异常", metrics.get("entity_identity_issues", [])),
         ("连接不足的长期知识", metrics.get("underlinked_knowledge", [])),
@@ -1905,7 +1916,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         ("写作任务知识漏接", metrics.get("writing_knowledge_handoff_issues", [])),
         ("候选知识去向失效", metrics.get("topic_knowledge_reference_issues", [])),
         ("未进入主题地图", metrics.get("knowledge_map_coverage_issues", [])),
-        ("发布信息待补", metrics.get("published_metadata_issues", [])),
+        ("发布资料异常", metrics.get("published_metadata_issues", [])),
         ("发布后未收尾", metrics.get("published_active_residue_issues", [])),
     )
     details = [(title, items) for title, items in detail_groups if items]
@@ -1942,7 +1953,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "- 候选知识去向失效：候选标记为已沉淀，但对应知识为空、不存在或只在待清理区。",
         "- 主题地图候选：多份来源和多条知识已经形成稳定聚集，但仍需人工确认边界；候选不会自动建图。",
         "- 未进入主题地图：长期知识还没有被任何 `map_role: theme` 地图引用；人物索引、产品模型索引、综合入口和地图总目录都不计入。",
-        "- 发布信息待补：已确认在某个平台发布，但准确发布时间或公开链接仍为空。",
+        "- 发布资料异常：平台链接和发布时间可以留空；只有已经填写却明显是草稿编辑器或创作者后台地址时才提醒。",
         "- 发布后未收尾：正式稿已经存在，但对应母稿、口播稿或成稿包仍留在活跃生产目录。",
         "- 属性 schema：`20-知识` 中 kind 不在枚举内或残留 type/created/updated/knowledge_type 旧字段的笔记数。",
         f"- 待清理超期：`90-归档/90-待清理` 中放置超过 {metrics.get('cleanup_retention_days', 90)} 天的目录，确认无误后可人工删除。",

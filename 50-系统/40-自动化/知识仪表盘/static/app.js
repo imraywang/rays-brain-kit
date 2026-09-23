@@ -1340,11 +1340,6 @@ function settleConfirm(result) {
 
 /* ---- 登记发布弹窗 ---- */
 
-function localDatetimeValue(date = new Date()) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
 function isoWithOffset(datetimeLocal) {
   const date = new Date(datetimeLocal);
   if (Number.isNaN(date.getTime())) return "";
@@ -1354,12 +1349,12 @@ function isoWithOffset(datetimeLocal) {
   return `${datetimeLocal}:00${sign}${pad(Math.trunc(offset / 60))}:${pad(offset % 60)}`;
 }
 
-const PLATFORM_URL_FIELDS = {
-  x: "x_article_url",
-  wechat: "wechat_public_url",
-  shipinhao: "shipinhao_url",
-  douyin: "douyin_url",
-  xiaohongshu: "xiaohongshu_url",
+const PLATFORM_STATUS_FIELDS = {
+  x: "x_article_status",
+  wechat: "wechat_status",
+  shipinhao: "shipinhao_status",
+  douyin: "douyin_status",
+  xiaohongshu: "xiaohongshu_status",
 };
 
 function openPublishDialog(note) {
@@ -1373,12 +1368,12 @@ function openPublishDialog(note) {
   $("#publish-again").hidden = true;
   $("#publish-cancel").textContent = "取消";
   $("#publish-url").value = "";
-  $("#publish-time").value = localDatetimeValue();
+  $("#publish-time").value = "";
   // 标出已登记的平台，默认选中第一个还没登记的
   const meta = note.frontmatter || {};
   let firstOpen = "";
   $$("#publish-platform option").forEach((option) => {
-    const recorded = Boolean((meta[PLATFORM_URL_FIELDS[option.value]] || "").trim());
+    const recorded = (meta[PLATFORM_STATUS_FIELDS[option.value]] || "").trim() === "published";
     option.textContent = option.textContent.replace(" ✓ 已登记", "") + (recorded ? " ✓ 已登记" : "");
     if (!recorded && !firstOpen) firstOpen = option.value;
   });
@@ -1409,7 +1404,7 @@ async function submitPublishDialog() {
   const path = state.publishTarget;
   const url = $("#publish-url").value.trim();
   const publishedAt = isoWithOffset($("#publish-time").value);
-  if (!path || !url || !publishedAt) return;
+  if (!path) return;
   const button = $("#publish-submit");
   button.disabled = true;
   button.textContent = "正在登记…";

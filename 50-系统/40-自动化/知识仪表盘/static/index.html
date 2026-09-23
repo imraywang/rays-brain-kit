@@ -284,13 +284,13 @@
           <option value="xiaohongshu">小红书</option>
         </select>
       </label>
-      <label>公开链接（不是草稿编辑器地址）
-        <input id="publish-url" type="url" autocomplete="off" required placeholder="https://…">
+      <label>公开链接（可选，不要填写草稿编辑器地址）
+        <input id="publish-url" type="text" inputmode="url" autocomplete="off" placeholder="https://…">
       </label>
-      <label>平台显示的发布时间
-        <input id="publish-time" type="datetime-local" required>
+      <label>平台显示的发布时间（可选）
+        <input id="publish-time" type="datetime-local">
       </label>
-      <p class="publish-note">脚本只登记事实，不发布任何东西。多个平台就登记多次。</p>
+      <p class="publish-note">只确认平台也可以登记；链接和时间以后有需要再补。脚本只登记事实，不发布任何东西。</p>
     </div>
     <pre class="publish-report" id="publish-report" hidden></pre>
     <div class="angle-buttons">

@@ -90,9 +90,33 @@ class RecordPublishedTests(unittest.TestCase):
             self.run_record(platform="x", url=WECHAT_URL)
 
     def test_naive_timestamp_is_refused(self) -> None:
-        """没有时区就算不出 24 小时到期时间，宁可报错也不猜。"""
+        """时间可留空；一旦填写，没有时区仍然报错。"""
         with self.assertRaises(self.rp.RecordError):
             self.run_record(published_at="2026-07-19T23:30:50")
+
+    def test_url_and_publish_time_are_optional(self) -> None:
+        self.run_record(url="", published_at="")
+        meta = self.meta(ARTICLE)
+        self.assertEqual(meta["x_article_status"], "published")
+        self.assertEqual(meta["x_article_url"], "")
+        self.assertEqual(meta["x_article_published_at"], "")
+        self.assertEqual(meta["publication_confirmed_at"], NOW)
+
+        card = "40-发布/00-内容反馈/2026-07-20-测试长文.md"
+        card_meta = self.meta(card)
+        self.assertEqual(card_meta["published_at"], "")
+        self.assertEqual(card_meta["public_url"], "")
+        self.assertEqual(card_meta["publication_confirmed_at"], NOW)
+        self.assertEqual(card_meta["due_at"], "2026-07-21T09:00:00-07:00")
+
+    def test_cli_only_requires_the_platform(self) -> None:
+        result = self.rp.main([
+            "--article", ARTICLE,
+            "--platform", "x",
+            "--now", NOW,
+            "--dry-run",
+        ])
+        self.assertEqual(result, 0)
 
     def test_second_different_url_is_refused_instead_of_overwritten(self) -> None:
         self.run_record()
@@ -113,10 +137,68 @@ class RecordPublishedTests(unittest.TestCase):
         self.run_record(dry_run=True)
         self.assertEqual((self.root / ARTICLE).read_text(encoding="utf-8"), before)
         self.assertFalse((self.root / CARD).exists())
+        self.assertTrue(self.paths["draft"].exists())
+        self.assertTrue(self.paths["pack"].exists())
+
+    # ---------------------------------------------------------- 发布后收尾
+
+    def test_published_article_closes_out_draft_and_content_pack(self) -> None:
+        self.run_record()
+        archived_draft = self.root / (
+            "90-归档/30-创作记录/旧文章草稿/2026-07/2026-07-19-测试长文母稿.md"
+        )
+        archived_pack = self.root / (
+            "90-归档/30-创作记录/旧成稿包/2026-07/2026-07-18-测试写作任务.md"
+        )
+        self.assertFalse(self.paths["draft"].exists())
+        self.assertFalse(self.paths["pack"].exists())
+        self.assertTrue(archived_draft.exists())
+        self.assertTrue(archived_pack.exists())
+        self.assertEqual(self.rp.parse_frontmatter(archived_draft.read_text())["status"], "archived")
+        self.assertEqual(self.rp.parse_frontmatter(archived_pack.read_text())["status"], "archived")
+
+        article = (self.root / ARTICLE).read_text(encoding="utf-8")
+        self.assertIn("90-归档/30-创作记录/旧文章草稿/2026-07", article)
+        self.assertIn("90-归档/30-创作记录/旧成稿包/2026-07", article)
+        # 母稿搬深了两级，配图相对路径必须跟着重算。
+        self.assertIn("../../../../60-素材/配图.png", archived_draft.read_text(encoding="utf-8"))
+
+    def test_closeout_is_idempotent(self) -> None:
+        self.run_record()
+        report = "\n".join(self.run_record())
+        self.assertIn("没有仍在活跃目录", report)
+
+    def test_closeout_only_repairs_an_old_published_chain(self) -> None:
+        article = self.root / ARTICLE
+        report = self.rp.closeout_published_chain(
+            article,
+            PUBLISHED_AT,
+            self.rp.parse_moment(NOW),
+        )
+        self.assertTrue(any("旧文章草稿" in line for line in report))
+        self.assertFalse(self.paths["draft"].exists())
+        self.assertFalse(self.paths["pack"].exists())
+
+    def test_closeout_stops_before_writes_when_archive_target_exists(self) -> None:
+        collision = self.root / (
+            "90-归档/30-创作记录/旧文章草稿/2026-07/2026-07-19-测试长文母稿.md"
+        )
+        collision.parent.mkdir(parents=True, exist_ok=True)
+        collision.write_text("已有文件", encoding="utf-8")
+        before = (self.root / ARTICLE).read_text(encoding="utf-8")
+        with self.assertRaises(self.rp.RecordError):
+            self.run_record()
+        self.assertEqual((self.root / ARTICLE).read_text(encoding="utf-8"), before)
+        self.assertTrue(self.paths["draft"].exists())
 
     # ---------------------------------------------------------- 反馈卡
 
     def test_creates_the_card_from_the_vault_template(self) -> None:
+        template = self.root / self.rp.ARTICLE_FEEDBACK_TEMPLATE
+        template.write_text(
+            template.read_text(encoding="utf-8") + "\n<!-- template-source-marker -->\n",
+            encoding="utf-8",
+        )
         self.run_record()
         meta = self.meta(CARD)
         self.assertEqual(meta["kind"], "content-feedback")
@@ -129,6 +211,10 @@ class RecordPublishedTests(unittest.TestCase):
         body = (self.root / CARD).read_text(encoding="utf-8")
         self.assertIn("## 24 小时", body)
         self.assertIn("## 7 天", body)
+        section_7d = body.split("## 7 天", 1)[1].split("## 回写", 1)[0]
+        self.assertIn("- 曝光：", section_7d)
+        self.assertIn("- 抓取时间：", section_7d)
+        self.assertIn("template-source-marker", body)
         # 正式稿要指得回反馈卡，否则健康检查找不到这张卡。
         self.assertEqual(
             self.meta(ARTICLE)["feedback_file"], "[[40-发布/00-内容反馈/2026-07-19-测试长文]]"
@@ -241,6 +327,26 @@ class RecordPublishedTests(unittest.TestCase):
         for platform in ("douyin", "xiaohongshu", "shipinhao"):
             self.assertEqual(meta[f"{platform}_status"], "published")
             self.assertEqual(meta[f"{platform}_published_at"], PUBLISHED_AT)
+        archived = self.root / (
+            "90-归档/30-创作记录/旧口播草稿/2026-07/2026-07-24-测试口播母稿.md"
+        )
+        self.assertTrue(archived.exists())
+        self.assertFalse(self.paths["oral_draft"].exists())
+
+    def test_platform_name_is_required_and_accumulates_without_duplicates(self) -> None:
+        video = self.root / VIDEO
+        video.write_text(
+            video.read_text(encoding="utf-8").replace(
+                'platform: "视频号；抖音；小红书"', 'platform: ""'
+            ),
+            encoding="utf-8",
+        )
+        self.run_video(platform="douyin", url="")
+        self.run_video(platform="shipinhao", url="")
+        article_meta = self.meta(VIDEO)
+        card_meta = self.meta(VIDEO_CARD)
+        self.assertEqual(article_meta["platform"], "抖音；视频号")
+        self.assertEqual(card_meta["platform"], "抖音；视频号")
 
     def test_video_card_uses_the_video_template(self) -> None:
         """图文那张卡没有完播率，套错模板等于三个平台的主指标一个都不记。"""
@@ -280,12 +386,12 @@ class RecordPublishedTests(unittest.TestCase):
             with self.assertRaises(self.rp.RecordError):
                 self.run_video(platform=platform, url=url)
 
-    def test_shipinhao_accepts_the_no_public_url_literal(self) -> None:
-        """视频号常常真的没有可分享地址；留空和"确实没有"必须分得开。"""
+    def test_shipinhao_accepts_blank_or_the_no_public_url_literal(self) -> None:
+        """链接可留空；需要时仍可明确记录平台没有公开地址。"""
+        self.run_video(platform="shipinhao", url="")
+        self.assertEqual(self.meta(VIDEO)["shipinhao_url"], "")
         self.run_video(platform="shipinhao", url=self.rp.NO_PUBLIC_URL)
         self.assertEqual(self.meta(VIDEO)["shipinhao_url"], self.rp.NO_PUBLIC_URL)
-        with self.assertRaises(self.rp.RecordError):
-            self.run_video(platform="shipinhao", url="")
 
     def test_a_video_without_an_x_bookmark_is_reported_not_invented(self) -> None:
         """口播稿来自微信读书，没有 X 书签可回写，要说清楚而不是乱改别的卡。"""

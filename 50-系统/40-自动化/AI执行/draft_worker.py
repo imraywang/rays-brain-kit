@@ -36,9 +36,8 @@ WRITER_SKILL_DIR = Path(
     os.environ.get("RAY_WRITER_SKILL_DIR", str(Path.home() / ".claude/skills/ray-writer"))
 ).expanduser()
 WRITER_SPEC_FILES = (
-    ("voice.md（语气）", "references/voice.md"),
-    ("article-prototypes.md（文章原型，只选一个主原型）", "references/article-prototypes.md"),
-    ("quality-gates.md（四层检查，作为你交稿前的自检标准）", "references/quality-gates.md"),
+    ("voice.md（表达规则与样本清单，最高优先级）", "references/voice.md"),
+    ("quality-gates.md（交稿前自检）", "references/quality-gates.md"),
 )
 
 
@@ -173,7 +172,7 @@ def gather_context(task_path: Path) -> tuple[dict[str, str], str]:
 
 
 def writer_specs() -> str:
-    """从 ray-writer skill 取真实写作规范：固定原则 + 语气 + 原型 + 质量门。
+    """从 ray-writer skill 取真实写作规范：固定原则 + 表达规则 + 交稿前自检。
 
     skill 未安装时返回空串，提示词退回自身的底线纪律——功能降级但不失败。
     """
@@ -295,6 +294,7 @@ def write_draft(task_path: Path, meta: dict[str, str], result: dict, model: str)
         f"created_at: {yaml_value(now_local())}",
         f"generated_by: {yaml_value('codex-' + (model or 'default'))}",
         f"content_pack: {yaml_value('[[' + rel(task_path)[:-3] + ']]')}",
+        "publish_exclude_sections: 待确认",
     ]
     for key in ("topic_id", "content_id", "candidate", "research", "source_url", "platform"):
         if meta.get(key, "").strip():
@@ -304,7 +304,7 @@ def write_draft(task_path: Path, meta: dict[str, str], result: dict, model: str)
     lines.append("---")
     content = "\n".join(lines) + f"\n\n# {title}\n\n{body}\n"
     if open_questions:
-        content += "\n## 待人工确认\n\n" + "\n".join(f"- [ ] {q}" for q in open_questions) + "\n"
+        content += "\n## 待确认\n\n" + "\n".join(f"- [ ] {q}" for q in open_questions) + "\n"
     path.write_text(content, encoding="utf-8")
     return path
 

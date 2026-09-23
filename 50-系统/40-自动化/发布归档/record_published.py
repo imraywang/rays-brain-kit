@@ -3,7 +3,8 @@
 
 这个脚本不发布任何东西。它不调用微信或 X 的任何接口，只在人已经在平台上完成
 公开发布之后，把结果写回知识库：正式稿的平台字段、发布反馈卡、源头书签的处理
-状态和去向。发布本身是用户动作，脚本只负责让归档不再靠手工惯例。
+状态和去向，以及母稿、独立口播稿和成稿包的本地收尾。发布本身是用户动作，
+脚本只负责让归档不再靠手工惯例。
 """
 from __future__ import annotations
 
@@ -22,6 +23,17 @@ VIDEO_DIR = "40-发布/50-口播视频"
 PUBLISHED_DIRS = ("40-发布/10-X长文", "40-发布/20-X短帖", VIDEO_DIR)
 FEEDBACK_DIR = "40-发布/00-内容反馈"
 X_BOOKMARK_DIR = "30-资料/30-X书签"
+ARTICLE_FEEDBACK_TEMPLATE = "50-系统/30-模板/内容反馈.md"
+VIDEO_FEEDBACK_TEMPLATE = "50-系统/30-模板/口播视频反馈.md"
+
+ACTIVE_WRITING_TASK_DIR = "10-创作/20-写作任务"
+ACTIVE_ARTICLE_DRAFT_DIR = "10-创作/30-文章草稿"
+ACTIVE_ORAL_DRAFT_DIR = "10-创作/25-口播草稿"
+ARCHIVE_WRITING_TASK_DIR = "90-归档/30-创作记录/旧成稿包"
+ARCHIVE_ARTICLE_DRAFT_DIR = "90-归档/30-创作记录/旧文章草稿"
+ARCHIVE_ORAL_DRAFT_DIR = "90-归档/30-创作记录/旧口播草稿"
+REFERENCE_SUFFIXES = frozenset({".md", ".json", ".base", ".canvas", ".yaml", ".yml"})
+REFERENCE_SKIP_DIRS = frozenset({".git", ".obsidian", "node_modules", "__pycache__"})
 
 FEEDBACK_24H_HOURS = 24
 FEEDBACK_7D_DAYS = 7
@@ -104,7 +116,7 @@ def update_frontmatter(text: str, updates: dict[str, str]) -> str:
 # ---------------------------------------------------------------- 路径与链接
 
 def rel(path: Path) -> str:
-    return path.relative_to(VAULT).as_posix()
+    return path.resolve().relative_to(VAULT).as_posix()
 
 
 def resolve_in_vault(value: str) -> Path:
@@ -148,6 +160,208 @@ def resolve_link(value: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+# ---------------------------------------------------------------- 发布后收尾
+
+LOCAL_MARKDOWN_LINK = re.compile(r"(!?\[[^\]]*\]\()([^)]+)(\))")
+
+
+def is_under(path: Path, relative_dir: str) -> bool:
+    try:
+        path.resolve().relative_to((VAULT / relative_dir).resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def archive_target(path: Path, month: str) -> tuple[Path, str] | None:
+    """返回（目标路径, 类型）。只有三个活跃生产目录会被自动收尾。"""
+    if is_under(path, ACTIVE_ARTICLE_DRAFT_DIR):
+        return VAULT / ARCHIVE_ARTICLE_DRAFT_DIR / month / path.name, "article-draft"
+    if is_under(path, ACTIVE_ORAL_DRAFT_DIR):
+        return VAULT / ARCHIVE_ORAL_DRAFT_DIR / month / path.name, "oral-script"
+    if is_under(path, ACTIVE_WRITING_TASK_DIR):
+        return VAULT / ARCHIVE_WRITING_TASK_DIR / month / path.name, "content-pack"
+    return None
+
+
+def rebase_markdown_links(text: str, old_parent: Path, new_parent: Path) -> str:
+    """移动 Markdown 后重算本地相对链接；网页、锚点、绝对路径保持不动。"""
+    def replace(match: re.Match[str]) -> str:
+        original = match.group(2)
+        raw = original.strip()
+        wrapped = raw.startswith("<") and raw.endswith(">")
+        if wrapped:
+            raw = raw[1:-1]
+        if raw.startswith(("http://", "https://", "mailto:", "#", "/", "data:")):
+            return match.group(0)
+        target = (old_parent / raw).resolve()
+        try:
+            target.relative_to(VAULT)
+        except ValueError:
+            return match.group(0)
+        rebased = os.path.relpath(target, new_parent).replace(os.sep, "/")
+        rendered = f"<{rebased}>" if wrapped or " " in rebased else rebased
+        prefix = original[: len(original) - len(original.lstrip())]
+        suffix = original[len(original.rstrip()):]
+        return match.group(1) + prefix + rendered + suffix + match.group(3)
+
+    return LOCAL_MARKDOWN_LINK.sub(replace, text)
+
+
+def reference_files() -> list[Path]:
+    files: list[Path] = []
+    for path in VAULT.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in REFERENCE_SUFFIXES:
+            continue
+        parts = path.relative_to(VAULT).parts
+        if any(part in REFERENCE_SKIP_DIRS for part in parts):
+            continue
+        files.append(path)
+    return files
+
+
+def replace_path_references(text: str, moves: dict[Path, Path]) -> str:
+    """同时修复知识库相对路径与保存在清单里的绝对路径。"""
+    for old, new in moves.items():
+        old_rel = rel(old)
+        new_rel = rel(new)
+        text = text.replace(str(old), str(new))
+        text = text.replace(old_rel, new_rel)
+        if old_rel.endswith(".md") and new_rel.endswith(".md"):
+            text = text.replace(old_rel[:-3], new_rel[:-3])
+    return text
+
+
+def closeout_published_chain(
+    article: Path,
+    published_at: str,
+    now: datetime,
+    dry_run: bool = False,
+) -> list[str]:
+    """把已发布内容的母稿与成稿包移出活跃区，并修复全库引用。
+
+    只处理正式稿明确链接到的文件；候选剩余角度、A/B 取舍等语义判断仍留给人。
+    """
+    article_text = article.read_text(encoding="utf-8")
+    article_meta = parse_frontmatter(article_text)
+    month = published_at[:7]
+    published_link = wikilink(article)
+
+    linked: list[Path] = []
+    sources: list[Path] = []
+    # 新正式稿统一用 draft_source；早期口播正式稿使用 oral_script。两种都是正式稿
+    # 明确声明的生产来源，不能因为字段名演进就把旧口播永远留在草稿区。
+    for key in ("draft_source", "oral_script"):
+        source = resolve_link(article_meta.get(key, ""))
+        if source is not None and source not in sources:
+            sources.append(source)
+            linked.append(source)
+
+    pack = resolve_link(article_meta.get("content_pack", ""))
+    if pack is None:
+        for source in sources:
+            source_meta = parse_frontmatter(
+                source.read_text(encoding="utf-8", errors="replace")
+            )
+            pack = resolve_link(source_meta.get("content_pack", ""))
+            if pack is not None:
+                break
+    if pack is not None and pack not in linked:
+        linked.append(pack)
+
+    moves: dict[Path, Path] = {}
+    kinds: dict[Path, str] = {}
+    for path in linked:
+        result = archive_target(path, month)
+        if result is None:
+            continue
+        target, kind = result
+        if target.exists() and target.resolve() != path.resolve():
+            raise RecordError(
+                f"发布登记已完成，但收尾停止：归档目标已存在 {rel(target)}。"
+                "为避免覆盖，请先确认同名文件。"
+            )
+        moves[path] = target
+        kinds[path] = kind
+
+    report = ["发布后收尾"]
+    if not moves:
+        report.append("  没有仍在活跃目录的母稿或写作任务")
+        return report
+
+    staged: dict[Path, str] = {}
+    for old, new in moves.items():
+        text = old.read_text(encoding="utf-8")
+        kind = kinds[old]
+        reason = (
+            "对应内容已公开发布，写作任务移出活跃区并保留追溯"
+            if kind == "content-pack"
+            else "对应内容已公开发布，母稿移出活跃草稿区并保留追溯"
+        )
+        updates = {
+            "status": "archived",
+            "archived_at": now.isoformat(timespec="seconds"),
+            "archived_reason": reason,
+            "published_file": published_link,
+        }
+        if kind in {"article-draft", "oral-script"}:
+            updates["kind"] = kind
+        text = update_frontmatter(text, updates)
+        if old.suffix.lower() == ".md":
+            text = rebase_markdown_links(text, old.parent, new.parent)
+        staged[new] = replace_path_references(text, moves)
+        report.append(f"  {rel(old)} -> {rel(new)}")
+
+    moved_sources = set(moves)
+    changed_references = 0
+    for path in reference_files():
+        if path in moved_sources:
+            continue
+        original = path.read_text(encoding="utf-8", errors="replace")
+        updated = replace_path_references(original, moves)
+        if updated != original:
+            staged[path] = updated
+            changed_references += 1
+    report.append(f"  同步修复 {changed_references} 个引用文件")
+
+    if dry_run:
+        report.append("  （预演：没有移动或改写文件）")
+        return report
+
+    # 先写好归档副本和全部引用，再移除旧副本。中途失败最多留下可恢复的双份，
+    # 不会出现先删源文件、后写目标失败的数据丢失。
+    for path, text in staged.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".tmp-closeout")
+        temp.write_text(text, encoding="utf-8")
+        temp.replace(path)
+    for old, new in moves.items():
+        if not new.is_file():
+            raise RecordError(f"收尾校验失败：没有生成归档文件 {rel(new)}")
+        old.unlink()
+    return report
+
+
+def closeout_anchor(article: Path, explicit: str = "") -> str:
+    """收尾只需要归档月份；优先精确发布时间，旧稿可退到自身日期。"""
+    if explicit.strip():
+        return check_published_at(explicit)
+    meta = parse_frontmatter(article.read_text(encoding="utf-8", errors="replace"))
+    for key in (
+        "x_article_published_at",
+        "wechat_published_at",
+        "shipinhao_published_at",
+        "douyin_published_at",
+        "xiaohongshu_published_at",
+        "published_at",
+        "created_at",
+    ):
+        value = meta.get(key, "").strip()
+        if re.match(r"\A\d{4}-\d{2}(?:-\d{2})?", value):
+            return value
+    raise RecordError("找不到可用于归档月份的发布时间或创建日期")
+
+
 # ---------------------------------------------------------------- 平台与校验
 
 X_STATUS_URL = re.compile(r"\Ahttps://x\.com/[A-Za-z0-9_]{1,15}/status/(\d{15,25})\Z")
@@ -164,9 +378,8 @@ XHS_URL = re.compile(
 XHS_SHORT_URL = re.compile(r"\Ahttps?://xhslink\.com/[A-Za-z0-9/_-]{4,40}\Z")
 SHIPINHAO_URL = re.compile(r"\Ahttps://channels\.weixin\.qq\.com/(?!platform)[^\s]+\Z")
 
-# 视频号常常根本给不出可分享的公开网页地址——这是平台事实，不是漏填。
-# 用一个固定字面量而不是留空，是为了让"确实没有链接"和"忘了填"在健康检查里
-# 分得开；留空的话，忘了填就再也发现不了。
+# 保留这个字面量兼容已有记录。新规则下链接本身是可选项，留空同样合法；如果用户
+# 明确知道平台没有公开地址，仍可写「无公开链接」表达这个事实。
 NO_PUBLIC_URL = "无公开链接"
 
 # 各平台的创作者后台地址。填进来这篇就会既显得已发布、又信息齐全，
@@ -213,6 +426,8 @@ URL_RULES = {
 
 def check_public_url(platform: str, url: str) -> str:
     url = url.strip()
+    if not url:
+        return ""
     matcher, label = BACKEND_URL_HINTS.get(platform, (None, ""))
     if matcher is not None and matcher(url):
         raise RecordError(
@@ -226,9 +441,12 @@ def check_public_url(platform: str, url: str) -> str:
 
 
 def check_published_at(value: str) -> str:
-    """必须是带时区的 ISO 时间：到期反馈按它计算，缺时区算不出正确的 24 小时。"""
+    """发布时间可留空；一旦填写，必须是带时区的 ISO 时间。"""
+    value = value.strip()
+    if not value:
+        return ""
     try:
-        moment = datetime.fromisoformat(value.strip())
+        moment = datetime.fromisoformat(value)
     except ValueError:
         raise RecordError(
             f"发布时间必须是 ISO 格式，例如 2026-07-19T23:30:50-07:00，收到：{value}"
@@ -252,7 +470,7 @@ PLATFORM_LABEL = {
     "xiaohongshu": "小红书",
 }
 
-# 每个平台一组字段名。健康检查按这些名字判断"发布信息待补"，写错一个就永远红着。
+# 每个平台一组字段名。status 是发布事实；url 和 published_at 是可选的追溯资料。
 PLATFORM_FIELDS = {
     "x": {
         "status": "x_article_status",
@@ -286,15 +504,29 @@ PLATFORM_FIELDS = {
 VIDEO_PLATFORMS = frozenset({"shipinhao", "douyin", "xiaohongshu"})
 
 
+def merge_platform_labels(existing: str, label: str) -> str:
+    """平台名称是发布事实：去重追加，不要求链接或准确时间。"""
+    existing = existing.strip().strip('"').strip("'")
+    if not existing:
+        return label
+    if label in existing:
+        return existing
+    return f"{existing}；{label}"
+
+
 def update_article(
-    path: Path, platform: str, url: str, published_at: str
+    path: Path,
+    platform: str,
+    url: str,
+    published_at: str,
+    confirmed_at: str,
 ) -> tuple[str, dict[str, str]]:
     text = path.read_text(encoding="utf-8")
     meta = parse_frontmatter(text)
     fields = PLATFORM_FIELDS[platform]
 
     recorded = meta.get(fields["url"], "").strip()
-    if recorded and recorded != url:
+    if recorded and url and recorded != url:
         raise RecordError(
             f"{PLATFORM_LABEL[platform]} 已经记过另一个公开地址：{recorded}\n"
             "同一篇稿子不该有两个公开地址。确认哪个是对的，先手工改掉再重跑。"
@@ -302,10 +534,19 @@ def update_article(
 
     updates = {
         fields["status"]: "published",
-        fields["url"]: url,
-        fields["published_at"]: published_at,
+        "platform": merge_platform_labels(
+            meta.get("platform", ""), PLATFORM_LABEL[platform]
+        ),
     }
-    # 这个字段的存在本身就代表"平台数据还没补齐"，补齐了就该消失。
+    if not meta.get("publication_confirmed_at", "").strip():
+        updates["publication_confirmed_at"] = confirmed_at
+    # 两项资料都可选。空值不能覆盖以前已经登记的真实资料；新记录仍保留空字段，
+    # 让不同平台的属性结构保持一致。
+    if url or fields["url"] not in meta:
+        updates[fields["url"]] = url
+    if published_at or fields["published_at"] not in meta:
+        updates[fields["published_at"]] = published_at
+    # 旧字段保留兼容：发布事实已经确认后，这张本地登记就算完成。
     if platform == "wechat" and meta.get("wechat_metadata_status", "").strip():
         updates["wechat_metadata_status"] = "complete"
     if meta.get("status", "").strip() != "published":
@@ -395,18 +636,18 @@ def update_bookmark(path: Path, article: Path) -> tuple[str, dict[str, str]]:
 DATE_PREFIX = re.compile(r"\A\d{4}-\d{2}-\d{2}-")
 
 
-def feedback_path(article: Path, published_at: str) -> Path:
-    """默认卡名 = 发布日期 + 正式稿标题。正式稿自带日期前缀时不重复写。"""
+def feedback_path(article: Path, date_anchor: str) -> Path:
+    """默认卡名 = 日期锚点 + 正式稿标题；无平台时间时使用本地确认日期。"""
     stem = DATE_PREFIX.sub("", article.stem)
-    day = published_at[:10]
+    day = date_anchor[:10]
     return VAULT / FEEDBACK_DIR / f"{day}-{stem}.md"
 
 
-def find_feedback_card(article: Path, article_meta: dict[str, str], published_at: str) -> Path:
+def find_feedback_card(article: Path, article_meta: dict[str, str], date_anchor: str) -> Path:
     linked = resolve_link(article_meta.get("feedback_file", ""))
     if linked:
         return linked
-    default = feedback_path(article, published_at)
+    default = feedback_path(article, date_anchor)
     if default.is_file():
         return default
     # 卡可能是手工建的、名字对不上，只能按 article 反查。
@@ -420,163 +661,21 @@ def find_feedback_card(article: Path, article_meta: dict[str, str], published_at
     return default
 
 
-# 逐字抄自 50-系统/30-模板/内容反馈.md，只把 {{date}} {{title}} 换成占位符。
-# 字段顺序照抄模板，新卡和手工建的卡才看起来是一份东西。
-FEEDBACK_TEMPLATE = """---
-kind: content-feedback
-status: pending
-article: ""
-platform: ""
-published_at: ""
-public_url: ""
-feedback_stage: 24h
-due_at: ""
-feedback_24h_status: pending
-feedback_7d_status: pending
-created_at: "{date}"
-updated_at: "{date}"
----
-
-# 内容反馈：{title}
-
-## 24 小时
-
-- 曝光：
-- 打开或阅读：
-- 收藏：
-- 转发：
-- 评论与私信：
-- 最强反馈：
-
-## 7 天
-
-- 持续流量：
-- 转化或线索：
-- 读者真正复用的部分：
-
-## 回写
-
-- [ ] 已更新候选中的剩余角度
-- [ ] 已沉淀可复用知识
-- [ ] 已记录下一轮要保留或改掉的做法
-"""
-
-# 逐字抄自 50-系统/30-模板/口播视频反馈.md。视频不能套图文那张卡：图文看的是点开
-# 之后（收藏、转发、读完），视频要先回答有没有被划走，所以完播率和平均播放时长
-# 排在点赞前面，而且三个平台的口径互不相同，必须分开记。
-VIDEO_FEEDBACK_TEMPLATE = """---
-kind: content-feedback
-status: pending
-form: 口播短视频
-article: ""
-topic: ""
-platform: ""
-published_at: ""
-public_url: ""
-feedback_stage: 24h
-due_at: ""
-feedback_24h_status: pending
-feedback_7d_status: pending
-created_at: "{date}"
-updated_at: "{date}"
----
-
-# 口播视频反馈：{title}
-
-三个平台的口径互不相同，分开记，不横向比较。
-
-## 24 小时事实快照
-
-### 视频号
-
-- 播放：
-- 点赞：
-- 推荐：
-- 评论：
-- 收藏：
-- 分享：
-- 新增关注：
-
-### 抖音
-
-- 播放：
-- 完播率：
-- 平均播放时长：
-- 点赞：
-- 评论：
-- 收藏：
-- 分享：
-- 新增粉丝：
-
-### 小红书
-
-- 曝光：
-- 阅读（点击）：
-- 点击率：
-- 点赞：
-- 收藏：
-- 评论：
-- 涨粉：
-
-## 24 小时初步信号
-
-- 前 3 秒有没有留住人：
-- 开头承诺的东西，观众等到了没有（中段有没有集中划走）：
-- 评论区在追问什么、在反驳什么：
-- 结尾的下集钩子换来了多少关注：
-
-## 7 天累计快照
-
-### 视频号
-
-- 播放：
-- 点赞：
-- 推荐：
-- 评论：
-- 收藏：
-- 分享：
-- 新增关注：
-
-### 抖音
-
-- 播放：
-- 完播率：
-- 平均播放时长：
-- 点赞：
-- 评论：
-- 收藏：
-- 分享：
-- 新增粉丝：
-
-### 小红书
-
-- 曝光：
-- 阅读（点击）：
-- 点击率：
-- 点赞：
-- 收藏：
-- 评论：
-- 涨粉：
-
-## 7 天判断
-
-- 24 小时之后还有没有继续推（有长尾是选题赢，没有是开头赢）：
-- 观众真正关心的是主题、角度、利益点、情绪还是表达形式：
-- 下次继续保留：
-- 下次停止：
-- 下一步值得测试：
-- 这个题值不值得再出一集 / 值不值得改写成长文：
-
-## 回写
-
-- [ ] 已更新候选中的剩余角度
-- [ ] 已沉淀可复用知识
-- [ ] 已记录下一轮要保留或改掉的做法
-"""
-
-
 def is_video(article: Path) -> bool:
     return rel(article).startswith(VIDEO_DIR)
+
+
+def render_feedback_template(article: Path, title: str, date_value: str) -> str:
+    """反馈卡只从 vault 模板读取，避免脚本与模板各维护一份。"""
+    relative = VIDEO_FEEDBACK_TEMPLATE if is_video(article) else ARTICLE_FEEDBACK_TEMPLATE
+    path = VAULT / relative
+    if not path.is_file():
+        raise RecordError(f"缺少反馈模板：{relative}")
+    return (
+        path.read_text(encoding="utf-8")
+        .replace("{{title}}", title)
+        .replace("{{date}}", date_value)
+    )
 
 
 def ensure_feedback_card(
@@ -588,19 +687,21 @@ def ensure_feedback_card(
     now: datetime,
 ) -> tuple[Path, str, dict[str, str], bool]:
     """每篇正式稿一张卡。已经存在就只补空缺，绝不把做完的复盘打回 pending。"""
-    path = find_feedback_card(article, article_meta, published_at)
+    date_anchor = published_at or now.isoformat(timespec="seconds")
+    path = find_feedback_card(article, article_meta, date_anchor)
     created = not path.is_file()
     if created:
-        template = VIDEO_FEEDBACK_TEMPLATE if is_video(article) else FEEDBACK_TEMPLATE
-        text = template.format(
-            title=DATE_PREFIX.sub("", article.stem),
-            date=now.isoformat(timespec="seconds"),
+        text = render_feedback_template(
+            article,
+            DATE_PREFIX.sub("", article.stem),
+            now.isoformat(timespec="seconds"),
         )
     else:
         text = path.read_text(encoding="utf-8")
     meta = parse_frontmatter(text)
 
-    moment = parse_moment(published_at)
+    # 没有平台时间时，从本地确认登记的时刻安排反馈；不把这个时刻冒充平台发布时间。
+    moment = parse_moment(date_anchor)
     due_24h = (moment + timedelta(hours=FEEDBACK_24H_HOURS)).isoformat(timespec="seconds")
     due_7d = (moment + timedelta(days=FEEDBACK_7D_DAYS)).isoformat(timespec="seconds")
 
@@ -618,12 +719,24 @@ def ensure_feedback_card(
     topic = article_meta.get("topic", "").strip() or article_meta.get("candidate", "").strip()
     if topic:
         fill("topic", topic)
-    fill("platform", article_meta.get("platform", "").strip() or PLATFORM_LABEL[platform])
-    fill("published_at", published_at)
-    fill("public_url", url)
+    article_platform = merge_platform_labels(
+        article_meta.get("platform", ""), PLATFORM_LABEL[platform]
+    )
+    platform_value = meta.get("platform", "").strip()
+    for known_label in PLATFORM_LABEL.values():
+        if known_label in article_platform:
+            platform_value = merge_platform_labels(platform_value, known_label)
+    if meta.get("platform", "").strip() != platform_value:
+        updates["platform"] = platform_value
+    if published_at:
+        fill("published_at", published_at)
+    if url:
+        fill("public_url", url)
+    fill("publication_confirmed_at", now.isoformat(timespec="seconds"))
     # 一条视频同时发三个平台时 public_url 只装得下第一个，所以每个平台的链接
     # 还要各自留一份——否则后两次运行的链接就丢了。
-    fill(PLATFORM_FIELDS[platform]["url"], url)
+    if url:
+        fill(PLATFORM_FIELDS[platform]["url"], url)
     fill("feedback_24h_status", "pending")
     fill("feedback_7d_status", "pending")
     fill("feedback_7d_due_at", due_7d)
@@ -680,7 +793,10 @@ def record(
     article_text = article.read_text(encoding="utf-8")
     article_meta = parse_frontmatter(article_text)
 
-    new_article_text, article_updates = update_article(article, platform, url, published_at)
+    confirmed_at = now.isoformat(timespec="seconds")
+    new_article_text, article_updates = update_article(
+        article, platform, url, published_at, confirmed_at
+    )
     card, card_text, card_updates, card_created = ensure_feedback_card(
         article, article_meta, platform, url, published_at, now
     )
@@ -695,6 +811,13 @@ def record(
     new_bookmark_text = ""
     if bookmark is not None:
         new_bookmark_text, bookmark_updates = update_bookmark(bookmark, article)
+
+    # 在写入发布字段前先预检收尾目标。同名冲突必须在任何落盘动作之前暴露，
+    # 避免出现“平台字段已经写了，但母稿只收了一半”的状态。
+    closeout_date_anchor = published_at or confirmed_at
+    closeout_preview = closeout_published_chain(
+        article, closeout_date_anchor, now, dry_run=True
+    )
 
     report: list[str] = []
     report.append(f"正式稿 {rel(article)}")
@@ -727,6 +850,8 @@ def record(
 
     if dry_run:
         report.append("")
+        report.extend(closeout_preview)
+        report.append("")
         report.append("（--dry-run：以上都没有真的写入）")
         return report
 
@@ -736,6 +861,8 @@ def record(
         card.write_text(card_text, encoding="utf-8")
     if bookmark is not None and bookmark_updates:
         bookmark.write_text(new_bookmark_text, encoding="utf-8")
+    report.append("")
+    report.extend(closeout_published_chain(article, closeout_date_anchor, now))
     return report
 
 
@@ -744,10 +871,11 @@ def main(argv: list[str] | None = None) -> int:
         description="记录一次已经完成的公开发布，并完成发布后归档。本脚本不发布任何东西。"
     )
     parser.add_argument("--article", required=True, help="正式稿路径（知识库相对路径即可）")
-    parser.add_argument("--platform", required=True, choices=sorted(PLATFORM_FIELDS))
-    parser.add_argument("--url", required=True, help="平台上的公开地址，不是草稿编辑器地址")
+    parser.add_argument("--closeout-only", action="store_true", help="只补做发布后收尾，不改平台字段")
+    parser.add_argument("--platform", choices=sorted(PLATFORM_FIELDS))
+    parser.add_argument("--url", default="", help="可选：平台公开地址，不是草稿编辑器地址")
     parser.add_argument(
-        "--published-at", required=True, help="发布时间，带时区，例如 2026-07-19T23:30:50-07:00"
+        "--published-at", default="", help="可选：发布时间；填写时需带时区，例如 2026-07-19T23:30:50-07:00"
     )
     parser.add_argument("--now", default="", help="仅供测试：覆盖当前时间")
     parser.add_argument("--dry-run", action="store_true", help="只打印将要写什么，不落盘")
@@ -755,9 +883,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         now = parse_moment(args.now) if args.now else datetime.now().astimezone()
-        for line in record(
-            args.article, args.platform, args.url, args.published_at, now, args.dry_run
-        ):
+        if args.closeout_only:
+            article = check_article(args.article)
+            anchor = closeout_anchor(article, args.published_at)
+            lines = closeout_published_chain(article, anchor, now, args.dry_run)
+        else:
+            if not args.platform:
+                raise RecordError(
+                    "登记发布需要提供 --platform；公开链接和发布时间可以留空。"
+                    "只补收尾请使用 --closeout-only"
+                )
+            lines = record(
+                args.article, args.platform, args.url, args.published_at, now, args.dry_run
+            )
+        for line in lines:
             print(line)
     except RecordError as exc:
         print(str(exc), file=sys.stderr)

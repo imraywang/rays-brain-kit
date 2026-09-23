@@ -10,8 +10,8 @@ updated_at: 2026-07-28
 ## 安全边界
 
 - **Codex 永远不直接写 vault。** 它在 `--sandbox read-only` 里读成稿包、候选、调研和源头材料，产出结构化 JSON；草稿落盘、任务状态回写、AI 任务队列勾销都由 `draft_worker.py` 完成，全程留操作日志。
-- **产出是待审初稿，不是定稿。** 草稿 `status: ai-draft`、`generated_by: codex-<model>`，正文末尾附「待人工确认」清单。事实复核、语气把关、定稿仍是人（或 /ray 的 ray-writer 链路）的事。
-- **不虚构纪律写进提示词**：作者经历、数据、引语只能来自给定材料，缺什么记进 open_questions，不许编。见 [draft-prompt.md](draft-prompt.md)，可直接编辑调教。
+- **产出是待审初稿，不是定稿。** 草稿 `status: ai-draft`、`generated_by: codex-<model>`，正文末尾附「待确认」清单。事实复核、语气把关、定稿仍是人（或 /ray 的 ray-writer 链路）的事。
+- **表达先行写进提示词**：以 Ray 口吻把观点说满，正文不自保；缺经历或数据可以按逻辑编补，但每一处都必须记进 open_questions（落盘为「待确认」）由 Ray 决定。见 [draft-prompt.md](draft-prompt.md)，可直接编辑调教。
 - 单并发：同一时间只允许一篇在起草（工作台端点防重入）。
 
 ## 组成

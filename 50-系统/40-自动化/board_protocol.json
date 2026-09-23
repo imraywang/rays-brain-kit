@@ -49,11 +49,15 @@
       "dirs": ["feedback_dir"],
       "status_labels": {
         "pending": "待复盘",
-        "reviewed": "已复盘"
+        "complete": "已复盘",
+        "not-needed": "无需复盘"
       },
+      "set_on_change": { "updated_at": "$datetime" },
       "transitions": [
-        { "from": "pending", "to": "reviewed", "label": "标记已复盘", "confirm": "确认已完成知识回写与剩余角度记录？", "set": { "reviewed_at": "$date" } },
-        { "from": "reviewed", "to": "pending", "label": "撤销复盘标记", "set": { "reviewed_at": "" } }
+        { "from": "pending", "to": "complete", "label": "标记已复盘", "confirm": "确认已完成知识回写与剩余角度记录？", "set": { "feedback_completed_at": "$datetime" } },
+        { "from": "complete", "to": "pending", "label": "撤销复盘标记", "set": { "feedback_completed_at": "" } },
+        { "from": "pending", "to": "not-needed", "label": "本轮无需复盘", "confirm": "确认这条内容本轮没有可用数据或无需继续复盘？", "set": { "feedback_completed_at": "$datetime" } },
+        { "from": "not-needed", "to": "pending", "label": "恢复为待复盘", "set": { "feedback_completed_at": "" } }
       ]
     }
   ]

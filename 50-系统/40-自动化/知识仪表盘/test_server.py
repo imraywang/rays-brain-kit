@@ -68,6 +68,14 @@ source_url: "https://example.com"
         self.record_script = self.vault / "发布归档/record_published.py"
         self.record_script.parent.mkdir(parents=True, exist_ok=True)
         self.record_script.write_text("# 测试占位\n", encoding="utf-8")
+        template_root = self.vault / "50-系统/30-模板"
+        template_root.mkdir(parents=True, exist_ok=True)
+        real_template_root = SERVER_PATH.parents[2] / "30-模板"
+        for name in ("内容反馈.md", "口播视频反馈.md"):
+            (template_root / name).write_text(
+                (real_template_root / name).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
         self.patchers = [
             mock.patch.object(dashboard, "VAULT", self.vault),
             mock.patch.object(dashboard, "REVIEW_DIR", self.review_dir),
@@ -333,7 +341,7 @@ source_url: "https://example.com"
             encoding="utf-8",
         )
         # 以口播起稿、没有图文母稿的内容，它自己就是母稿，必须出现。
-        oral_dir = self.vault / "10-创作/20-口播草稿"
+        oral_dir = self.vault / "10-创作/25-口播草稿"
         oral_dir.mkdir(parents=True)
         (oral_dir / "口播母稿.md").write_text(
             "---\nkind: oral-script\nstatus: draft\n---\n\n# 一篇口播母稿\n",
@@ -463,7 +471,7 @@ source_url: "https://example.com"
                     "red_reasons": [],
                     "yellow_reasons": [
                         "有 2 条到期反馈尚未复盘",
-                        "有 4 篇已发布内容缺少平台公开信息",
+                        "有 4 篇已发布内容的平台资料填写不正确",
                     ],
                 },
                 ensure_ascii=False,
@@ -476,7 +484,7 @@ source_url: "https://example.com"
             payload["health_reasons"],
             [
                 "有 2 条到期反馈尚未复盘",
-                "有 4 篇已发布内容缺少平台公开信息",
+                "有 4 篇已发布内容的平台资料填写不正确",
             ],
         )
 
@@ -511,10 +519,6 @@ source_url: "https://example.com"
         layout = dict(dashboard.DEFAULT_LAYOUT)
         created = bootstrap.build_vault(target, layout, demo=True)
         self.assertTrue(created)
-        manifest = json.loads((target / ".ray-obsidian.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schema_version"], 2)
-        self.assertEqual(manifest["layout"], "ray-content-v2")
-        self.assertEqual(manifest["managed_by"], "rays-brain-kit")
         with mock.patch.object(dashboard, "VAULT", target), \
              mock.patch.object(dashboard, "REVIEW_DIR", target / layout["review_dir"]), \
              mock.patch.object(dashboard, "INBOX_FILE", target / layout["inbox_file"]):
@@ -654,7 +658,7 @@ source_url: "https://example.com"
         with self.assertRaisesRegex(ValueError, "工作目录"):
             dashboard.apply_transition("20-知识/伪装候选.md", "parked", None)
 
-    def test_feedback_review_roundtrip_manages_reviewed_at(self) -> None:
+    def test_feedback_review_roundtrip_manages_completed_at(self) -> None:
         feedback_dir = self.vault / dashboard.LAYOUT["feedback_dir"]
         feedback_dir.mkdir(parents=True)
         path = feedback_dir / "反馈.md"
@@ -662,14 +666,14 @@ source_url: "https://example.com"
             "---\nkind: content-feedback\nstatus: pending\n---\n\n# 反馈\n", encoding="utf-8"
         )
         rel = dashboard.relative(path)
-        dashboard.apply_transition(rel, "reviewed", None)
+        dashboard.apply_transition(rel, "complete", None)
         text = path.read_text(encoding="utf-8")
-        self.assertIn("status: reviewed", text)
-        self.assertRegex(text, r"reviewed_at: \d{4}-\d{2}-\d{2}")
+        self.assertIn("status: complete", text)
+        self.assertRegex(text, r'feedback_completed_at: "\d{4}-\d{2}-\d{2} \d{2}:\d{2}"')
         dashboard.apply_transition(rel, "pending", None)
         text = path.read_text(encoding="utf-8")
         self.assertIn("status: pending", text)
-        self.assertIn('reviewed_at: ""', text)
+        self.assertIn('feedback_completed_at: ""', text)
         payload = dashboard.dashboard_payload()
         self.assertEqual(payload["counts"]["feedback_pending"], 1)
 
@@ -874,12 +878,12 @@ source_url: "https://example.com"
 
     def test_record_publication_archives_and_backfills(self) -> None:
         draft, pack = self._write_publish_chain()
-        fake = mock.Mock(returncode=0, stdout="正式稿 40-发布/...\n反馈卡 ...\n", stderr="")
-        with mock.patch.object(dashboard.subprocess, "run", return_value=fake) as run:
+        real_script = Path(__file__).resolve().parent.parent / "发布归档/record_published.py"
+        with mock.patch.object(dashboard, "RECORD_SCRIPT", real_script):
             result = dashboard.record_publication(
                 "10-创作/30-文章草稿/草稿.md",
                 "x",
-                "https://x.com/wangray/status/123",
+                "https://x.com/wangray/status/2079091643693863273",
                 "2026-07-28T10:00:00-07:00",
             )
         self.assertTrue(result["ok"])
@@ -889,16 +893,17 @@ source_url: "https://example.com"
         article_text = article.read_text(encoding="utf-8")
         self.assertIn("kind: article-published", article_text)
         self.assertIn("status: published", article_text)
-        self.assertIn("draft_source:", article_text)
-        draft_text = draft.read_text(encoding="utf-8")
-        self.assertIn("status: published", draft_text)
-        self.assertIn("published_file:", draft_text)
-        pack_text = pack.read_text(encoding="utf-8")
-        self.assertIn("status: published", pack_text)
-        command = run.call_args.args[0]
-        self.assertIn("--article", command)
-        self.assertIn("40-发布/10-X长文/草稿.md", command)
-        self.assertEqual(run.call_args.kwargs["env"]["RAYS_BRAIN"], str(self.vault))
+        self.assertIn("90-归档/30-创作记录/旧文章草稿/2026-07/草稿", article_text)
+        self.assertIn("90-归档/30-创作记录/旧成稿包/2026-07/任务", article_text)
+        self.assertFalse(draft.exists())
+        self.assertFalse(pack.exists())
+        archived_draft = self.vault / "90-归档/30-创作记录/旧文章草稿/2026-07/草稿.md"
+        archived_pack = self.vault / "90-归档/30-创作记录/旧成稿包/2026-07/任务.md"
+        self.assertTrue(archived_draft.exists())
+        self.assertTrue(archived_pack.exists())
+        self.assertIn("status: archived", archived_draft.read_text(encoding="utf-8"))
+        self.assertIn("status: archived", archived_pack.read_text(encoding="utf-8"))
+        self.assertIn("发布后收尾", "\n".join(result["report"]))
 
     def test_record_publication_reuses_existing_article(self) -> None:
         draft, _ = self._write_publish_chain()
@@ -909,28 +914,49 @@ source_url: "https://example.com"
             "---\nkind: article-published\nstatus: published\ncontent_id: article-abc\n---\n\n# 已归档\n",
             encoding="utf-8",
         )
-        fake = mock.Mock(returncode=0, stdout="ok\n", stderr="")
-        with mock.patch.object(dashboard.subprocess, "run", return_value=fake):
+        real_script = Path(__file__).resolve().parent.parent / "发布归档/record_published.py"
+        with mock.patch.object(dashboard, "RECORD_SCRIPT", real_script):
             result = dashboard.record_publication(
                 "10-创作/30-文章草稿/草稿.md",
                 "wechat",
-                "https://mp.weixin.qq.com/s/abc",
+                "https://mp.weixin.qq.com/s/AbCdEfGh12345",
                 "2026-07-28T10:00:00-07:00",
             )
         self.assertFalse(result["created_article"])
         self.assertEqual(result["article"], "40-发布/10-X长文/已归档.md")
         self.assertFalse((self.vault / "40-发布/10-X长文/草稿.md").exists())
+        self.assertFalse(draft.exists())
+        self.assertTrue(
+            (self.vault / "90-归档/30-创作记录/旧文章草稿/2026-07/草稿.md").exists()
+        )
+        existing_text = existing.read_text(encoding="utf-8")
+        self.assertIn("90-归档/30-创作记录/旧文章草稿/2026-07/草稿", existing_text)
+        self.assertIn("90-归档/30-创作记录/旧成稿包/2026-07/任务", existing_text)
 
     def test_record_publication_validates_input(self) -> None:
         self._write_publish_chain()
         with self.assertRaisesRegex(ValueError, "平台"):
             dashboard.record_publication("10-创作/30-文章草稿/草稿.md", "weibo", "https://x", "2026-07-28T10:00:00-07:00")
-        with self.assertRaisesRegex(ValueError, "不能为空"):
-            dashboard.record_publication("10-创作/30-文章草稿/草稿.md", "x", "", "2026-07-28T10:00:00-07:00")
         with self.assertRaisesRegex(ValueError, "只能对草稿"):
             dashboard.record_publication(
                 "10-创作/10-灵感/10-待评估/剪藏复核/test.md", "x", "https://x.com/1", "2026-07-28T10:00:00-07:00"
             )
+
+    def test_record_publication_accepts_optional_url_and_time(self) -> None:
+        draft, pack = self._write_publish_chain()
+        real_script = Path(__file__).resolve().parent.parent / "发布归档/record_published.py"
+        with mock.patch.object(dashboard, "RECORD_SCRIPT", real_script):
+            result = dashboard.record_publication(
+                "10-创作/30-文章草稿/草稿.md", "x", "", ""
+            )
+        self.assertTrue(result["ok"])
+        article = self.vault / "40-发布/10-X长文/草稿.md"
+        meta = dashboard.parse_frontmatter(article.read_text(encoding="utf-8"))
+        self.assertEqual(meta["x_article_status"], "published")
+        self.assertEqual(meta["x_article_url"], "")
+        self.assertEqual(meta["x_article_published_at"], "")
+        self.assertFalse(draft.exists())
+        self.assertFalse(pack.exists())
 
     def test_note_payload_flags_publishable_notes(self) -> None:
         draft, _ = self._write_publish_chain()
@@ -963,10 +989,7 @@ class TailnetAccessTests(unittest.TestCase):
     def test_request_host_handles_ports_and_ipv6_literals(self) -> None:
         self.assertEqual(dashboard.request_host("127.0.0.1:8765"), "127.0.0.1")
         self.assertEqual(dashboard.request_host("[::1]:8765"), "::1")
-        self.assertEqual(
-            dashboard.request_host("Creator-Mac.Example.TS.NET:8765"),
-            "creator-mac.example.ts.net",
-        )
+        self.assertEqual(dashboard.request_host("Creator-Mac.Example.TS.NET:8765"), "creator-mac.example.ts.net")
         self.assertEqual(dashboard.request_host(""), "")
 
     def test_is_tailnet_address_only_matches_tailscale_ranges(self) -> None:
@@ -983,28 +1006,18 @@ class TailnetAccessTests(unittest.TestCase):
         extra = {"100.64.0.42", "creator-mac.example.ts.net"}
         with mock.patch.object(dashboard, "EXTRA_ALLOWED_HOSTS", extra):
             self.assertTrue(self._handler({"Host": "100.64.0.42:8765"}).allowed_host())
-            self.assertTrue(
-                self._handler({"Host": "creator-mac.example.ts.net:8765"}).allowed_host()
-            )
+            self.assertTrue(self._handler({"Host": "creator-mac.example.ts.net:8765"}).allowed_host())
             # DNS rebinding：Host 不在白名单仍然拒绝
             self.assertFalse(self._handler({"Host": "evil.example.com:8765"}).allowed_host())
-            self.assertTrue(
-                self._handler({"Origin": "http://creator-mac.example.ts.net:8765"}).local_origin()
-            )
-            self.assertTrue(
-                self._handler({"Origin": "https://creator-mac.example.ts.net"}).local_origin()
-            )
+            self.assertTrue(self._handler({"Origin": "http://creator-mac.example.ts.net:8765"}).local_origin())
+            self.assertTrue(self._handler({"Origin": "https://creator-mac.example.ts.net"}).local_origin())
             self.assertFalse(self._handler({"Origin": "http://evil.example.com"}).local_origin())
-        self.assertFalse(
-            self._handler({"Origin": "http://creator-mac.example.ts.net:8765"}).local_origin()
-        )
+        self.assertFalse(self._handler({"Origin": "http://creator-mac.example.ts.net:8765"}).local_origin())
 
     def test_ponte_hosts_allowed_without_optin(self) -> None:
         # Surge Ponte 在本机把 *.sgponte 解析到 127.0.0.1，视同本机访问，无需开关
         self.assertTrue(self._handler({"Host": "creator-mac.sgponte:8765"}).allowed_host())
-        self.assertTrue(
-            self._handler({"Origin": "http://creator-mac.sgponte:8765"}).local_origin()
-        )
+        self.assertTrue(self._handler({"Origin": "http://creator-mac.sgponte:8765"}).local_origin())
         # 不是该后缀的域名不受影响
         self.assertFalse(self._handler({"Host": "sgponte.evil.com:8765"}).allowed_host())
         self.assertFalse(self._handler({"Host": "evil-sgponte.com:8765"}).allowed_host())

@@ -13,13 +13,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCHEMA_VERSION = 2
-LAYOUT_NAME = "ray-content-v2"
 
 SKELETON_KEYS = (
     "review_dir",
@@ -83,25 +79,6 @@ def write_if_missing(vault: Path, relative: str, content: str, created: list[str
     created.append(relative)
 
 
-def write_manifest_if_missing(vault: Path, created: list[str]) -> None:
-    manifest_path = vault / ".ray-obsidian.json"
-    if manifest_path.exists():
-        return
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "layout": LAYOUT_NAME,
-        "name": vault.name or "我的知识库",
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "managed_by": "rays-brain-kit",
-    }
-    write_if_missing(
-        vault,
-        ".ray-obsidian.json",
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        created,
-    )
-
-
 def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list[str]:
     created: list[str] = []
     for key in SKELETON_KEYS:
@@ -116,7 +93,6 @@ def build_vault(vault: Path, layout: dict[str, str], demo: bool = False) -> list
         "# 链接收件箱\n\n临时看到但来不及处理的链接放这里，每行一个：`- [ ] https://… 备注`。\n\n## 待处理\n",
         created,
     )
-    write_manifest_if_missing(vault, created)
     if demo:
         review = layout["review_dir"]
         write_if_missing(vault, f"{review}/演示卡-AI工作流.md", REVIEW_CARD.format(

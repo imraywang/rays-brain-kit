@@ -145,6 +145,49 @@ class ContentSnapshotRunTests(unittest.TestCase):
         self.assertEqual(success["status"], "committed")
         self.assertFalse(snapshot.LOCK_DIR.exists())
 
+    def test_ignored_media_directory_does_not_block_snapshot(self) -> None:
+        (self.vault / ".gitignore").write_text("60-素材/\n", encoding="utf-8")
+        media = self.vault / "60-素材/封面.png"
+        media.parent.mkdir(parents=True)
+        media.write_bytes(b"not-a-real-png")
+        note = self.vault / "20-知识/可提交.md"
+        note.write_text("# 可提交\n", encoding="utf-8")
+
+        with patch.object(snapshot, "weread_key", return_value=""):
+            self.assertEqual(snapshot.run_snapshot(), 0)
+
+        committed = self.run_git(
+            "-c", "core.quotepath=false", "show", "--name-only", "--format="
+        ).stdout.splitlines()
+        self.assertEqual(committed, ["20-知识/可提交.md"])
+        self.assertTrue(media.is_file())
+
+    def test_partial_staging_is_rolled_back_when_git_add_fails(self) -> None:
+        note = self.vault / "20-知识/不能留下半成品.md"
+        note.write_text("# 不能留下半成品\n", encoding="utf-8")
+        original_git = snapshot.git
+
+        def failing_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+            if args[:3] == ("add", "-A", "--"):
+                original_git("add", "--", "20-知识/不能留下半成品.md")
+                raise subprocess.CalledProcessError(
+                    1,
+                    ["git", *args],
+                    stderr="simulated add failure",
+                )
+            return original_git(*args, check=check)
+
+        with (
+            patch.object(snapshot, "weread_key", return_value=""),
+            patch.object(snapshot, "git", side_effect=failing_git),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated add failure"):
+                snapshot.run_snapshot()
+
+        self.assertEqual(self.run_git("diff", "--cached", "--name-only").stdout, "")
+        self.assertTrue(note.is_file())
+        self.assertFalse(snapshot.LOCK_DIR.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

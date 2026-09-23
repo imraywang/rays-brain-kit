@@ -113,6 +113,23 @@ class FeedbackSnapshotTests(unittest.TestCase):
         fb.run(self.vault, now=self.now, fetch=self.fetch)
         self.assertIn("- 浏览：9999", self.card.read_text(encoding="utf-8"))
 
+    def test_semantic_only_7d_template_keeps_the_numeric_snapshot(self) -> None:
+        text = CARD.replace(
+            "- 浏览：\n- 点赞：\n- 收藏：\n- 转发：\n- 评论：",
+            "- 持续流量：\n- 转化或线索：\n- 读者真正复用的部分：",
+        )
+        self.card.write_text(text, encoding="utf-8")
+        fb.run(self.vault, now=self.now, fetch=self.fetch)
+        updated = self.card.read_text(encoding="utf-8")
+        section = updated.split("## 7 天累计快照", 1)[1].split("## 7 天判断", 1)[0]
+        self.assertIn("- 曝光：2270", section)
+        self.assertIn("- 收藏：4", section)
+        self.assertIn("- 转发：2", section)
+        self.assertIn("- 评论与私信：3", section)
+        self.assertIn("- 持续流量：", section)
+        meta = fb.parse_frontmatter(updated)
+        self.assertEqual(meta["feedback_7d_data_status"], "captured")
+
     def test_board_lists_ready_item_with_suggestion(self) -> None:
         fb.run(self.vault, now=self.now, fetch=self.fetch)
         board = self.board.read_text(encoding="utf-8")
@@ -130,7 +147,8 @@ class FeedbackSnapshotTests(unittest.TestCase):
         fb.run(self.vault, now=self.now + timedelta(days=1), fetch=self.fetch)
         card = self.card.read_text(encoding="utf-8")
         meta = fb.parse_frontmatter(card)
-        self.assertEqual(meta["status"], "复盘完成")
+        self.assertEqual(meta["status"], "complete")
+        self.assertEqual(meta["feedback_stage"], "closed")
         self.assertTrue(meta["feedback_completed_at"])
         self.assertIn("## 复盘结论", card)
         self.assertIn("停止此角度", card)
@@ -155,7 +173,8 @@ class FeedbackSnapshotTests(unittest.TestCase):
     def test_stale_close(self) -> None:
         fb.run(self.vault, now=PUBLISHED + timedelta(days=45), fetch=self.fetch)
         meta = fb.parse_frontmatter(self.card.read_text(encoding="utf-8"))
-        self.assertEqual(meta["status"], "无需复盘")
+        self.assertEqual(meta["status"], "not-needed")
+        self.assertEqual(meta["feedback_stage"], "closed")
         self.assertIn("close_reason", meta)
 
     def test_video_card_without_links_goes_to_waiting(self) -> None:
@@ -167,8 +186,51 @@ class FeedbackSnapshotTests(unittest.TestCase):
         )
         fb.run(self.vault, now=self.now, fetch=self.fetch)
         board = self.board.read_text(encoding="utf-8")
-        self.assertIn("等待数据或链接", board)
+        self.assertIn("等待条件补齐", board)
         self.assertIn("2026-07-24-视频", board)
+
+    def test_legacy_completed_status_is_normalized(self) -> None:
+        self.card.write_text(
+            CARD.replace("status: pending", "status: 复盘完成", 1).replace(
+                "feedback_7d_status: pending",
+                "feedback_7d_status: pending\nshipinhao_data_status: pending",
+            ),
+            encoding="utf-8",
+        )
+        summary = fb.run(self.vault, now=self.now, fetch=self.fetch)
+        meta = fb.parse_frontmatter(self.card.read_text(encoding="utf-8"))
+        self.assertEqual(summary["normalized"], 1)
+        self.assertEqual(meta["status"], "complete")
+        self.assertEqual(meta["feedback_stage"], "closed")
+        self.assertEqual(meta["feedback_7d_status"], "unavailable")
+        self.assertEqual(meta["shipinhao_data_status"], "unavailable")
+
+    def test_close_current_without_data_is_explicit_and_syncs_article(self) -> None:
+        article = self.vault / "40-发布/10-X长文/测试文章.md"
+        article.parent.mkdir(parents=True)
+        article.write_text(
+            "---\nkind: article-published\nstatus: published\n"
+            "feedback_24h_status: pending\nfeedback_7d_status: pending\n"
+            "shipinhao_data_status: pending\ndouyin_data_status: pending\n---\n\n# 测试\n",
+            encoding="utf-8",
+        )
+        summary = fb.run(
+            self.vault,
+            now=self.now,
+            fetch=self.fetch,
+            close_current_without_data=True,
+        )
+        meta = fb.parse_frontmatter(self.card.read_text(encoding="utf-8"))
+        self.assertEqual(summary["closed_without_data"], 1)
+        self.assertEqual(meta["status"], "complete")
+        self.assertEqual(meta["feedback_24h_status"], "complete")
+        self.assertEqual(meta["feedback_7d_status"], "unavailable")
+        self.assertEqual(meta["verdict"], "data-unavailable")
+        article_meta = fb.parse_frontmatter(article.read_text(encoding="utf-8"))
+        self.assertEqual(article_meta["feedback_24h_status"], "complete")
+        self.assertEqual(article_meta["feedback_7d_status"], "unavailable")
+        self.assertEqual(article_meta["shipinhao_data_status"], "unavailable")
+        self.assertEqual(article_meta["douyin_data_status"], "unavailable")
 
     def test_pure_video_platform_card_downgraded_and_ready(self) -> None:
         video = self.feedback_dir / "2026-07-24-纯视频.md"
@@ -176,6 +238,7 @@ class FeedbackSnapshotTests(unittest.TestCase):
             "---\nkind: content-feedback\nstatus: pending\nform: 口播短视频\n"
             "platform: \"视频号；抖音；小红书\"\n"
             "published_at: \"\"\npublic_url: \"\"\ndue_at: \"\"\n"
+            f"publication_confirmed_at: {PUBLISHED.isoformat()}\n"
             "shipinhao_data_status: pending\ndouyin_data_status: pending\n"
             "xiaohongshu_data_status: pending\n---\n\n# 纯视频反馈\n",
             encoding="utf-8",

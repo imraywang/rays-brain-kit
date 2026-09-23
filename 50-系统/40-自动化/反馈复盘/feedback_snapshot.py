@@ -31,6 +31,10 @@ DONE_STATUSES = {
     "done", "published", "rejected", "已关闭", "已取消", "已完成", "已发布", "已归档",
     "not-needed", "not_needed", "reviewed", "无需复盘", "复盘完成", "已复盘",
 }
+LEGACY_COMPLETE_STATUSES = {
+    "reviewed", "复盘完成", "已复盘", "completed", "done", "closed", "已完成", "已关闭",
+}
+LEGACY_NOT_NEEDED_STATUSES = {"无需复盘", "not_needed"}
 VERDICTS = [
     ("continue", "继续深挖"),
     ("stop", "停止此角度"),
@@ -145,6 +149,7 @@ def fill_x_bullets(lines: list[str], sec: tuple[int, int], metrics: dict[str, An
     values["_retweet_total"] = int(metrics.get("retweet_count", 0)) + int(metrics.get("quote_count", 0))
     out = list(lines)
     has_capture_line = False
+    recognized = 0
     for i in range(sub[0], sub[1]):
         m = re.match(r"^(\s*)- (\S+?)：(.*)$", out[i])
         if not m:
@@ -156,9 +161,29 @@ def fill_x_bullets(lines: list[str], sec: tuple[int, int], metrics: dict[str, An
                 out[i] = f"{indent}- 抓取时间：{captured_at}"
             continue
         for want, key in METRIC_BULLETS:
-            if label == want and not current and key in values:
-                out[i] = f"{indent}- {label}：{values[key]}"
-                filled += 1
+            if label == want:
+                recognized += 1
+                if not current and key in values:
+                    out[i] = f"{indent}- {label}：{values[key]}"
+                    filled += 1
+                break
+    # 早期模板的 7 天章节只有「持续流量 / 转化 / 复用」等判断项，
+    # 没有公开指标槽位。此时把数值快照补进章节，避免只写 captured 状态却丢掉数据。
+    if recognized == 0:
+        insert_at = sub[0] + 1
+        while insert_at < len(out) and not out[insert_at].strip():
+            insert_at += 1
+        snapshot = [
+            f"- 曝光：{values.get('impression_count', '')}",
+            f"- 收藏：{values.get('bookmark_count', '')}",
+            f"- 转发：{values.get('_retweet_total', '')}",
+            f"- 评论与私信：{values.get('reply_count', '')}",
+            f"- 抓取时间：{captured_at}",
+            "",
+        ]
+        out[insert_at:insert_at] = snapshot
+        filled += sum(1 for line in snapshot[:4] if line.split("：", 1)[1])
+        has_capture_line = True
     if filled and not has_capture_line:
         insert_at = sub[1]
         while insert_at > sub[0] and not out[insert_at - 1].strip():
@@ -226,6 +251,137 @@ def due_of(meta: dict[str, str], now: datetime) -> datetime | None:
     return None
 
 
+def publication_anchor(meta: dict[str, str]) -> datetime | None:
+    """平台时间优先；缺失时使用本地确认发布的时间安排复盘。"""
+    return parse_dt(meta.get("published_at", "")) or parse_dt(
+        meta.get("publication_confirmed_at", "")
+    )
+
+
+def linked_article(vault: Path, meta: dict[str, str]) -> Path | None:
+    match = re.match(r"\s*\[\[([^\]|#]+)", meta.get("article", ""))
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    path = vault / (raw if raw.endswith(".md") else raw + ".md")
+    try:
+        path.resolve().relative_to(vault.resolve())
+    except ValueError:
+        return None
+    return path if path.is_file() else None
+
+
+def sync_article_feedback(vault: Path, meta: dict[str, str]) -> bool:
+    path = linked_article(vault, meta)
+    if path is None:
+        return False
+    text = path.read_text(encoding="utf-8")
+    updates = {
+        key: meta.get(key, "")
+        for key in (
+            "feedback_24h_status", "feedback_7d_status", *UNFETCHABLE_STATUS_KEYS,
+        )
+        if meta.get(key, "")
+    }
+    if not updates:
+        return False
+    updated = set_frontmatter_keys(text, updates)
+    if updated == text:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def normalize_card(path: Path, vault: Path, now: datetime) -> bool:
+    """把历史叫法收敛到 pending / complete / not-needed，并补齐反馈日程。"""
+    text = path.read_text(encoding="utf-8")
+    meta = parse_frontmatter(text)
+    status = meta.get("status", "").strip().lower()
+    updates: dict[str, str] = {}
+    if status in LEGACY_NOT_NEEDED_STATUSES:
+        updates["status"] = "not-needed"
+        updates["feedback_stage"] = "closed"
+        for key in ("feedback_24h_status", "feedback_7d_status"):
+            if meta.get(key, "").strip() in {"", "pending"}:
+                updates[key] = "not-needed"
+    elif status in LEGACY_COMPLETE_STATUSES:
+        updates["status"] = "complete"
+        updates["feedback_stage"] = "closed"
+        for key in ("feedback_24h_status", "feedback_7d_status"):
+            if meta.get(key, "").strip() in {"", "pending"}:
+                updates[key] = "unavailable"
+
+    current_status = updates.get("status", status)
+    if current_status in {"complete", "not-needed"}:
+        fallback = "unavailable" if current_status == "complete" else "not-needed"
+        if meta.get("feedback_stage", "").strip() != "closed":
+            updates["feedback_stage"] = "closed"
+        for key in UNFETCHABLE_STATUS_KEYS:
+            if meta.get(key, "").strip() in {"", "pending"}:
+                updates[key] = fallback
+
+    current = {**meta, **updates}
+    if current.get("status", "").strip() == "pending":
+        anchor = publication_anchor(current)
+        if anchor:
+            if not current.get("publication_confirmed_at", "").strip() and not current.get("published_at", "").strip():
+                updates["publication_confirmed_at"] = iso(anchor)
+            if not current.get("feedback_7d_due_at", "").strip():
+                updates["feedback_7d_due_at"] = iso(anchor + timedelta(days=7))
+            if not current.get("due_at", "").strip():
+                stage = current.get("feedback_stage", "24h").strip()
+                updates["due_at"] = iso(
+                    anchor + (timedelta(days=7) if stage == "7d" else timedelta(hours=24))
+                )
+
+    if not updates:
+        return False
+    updates["updated_at"] = iso(now)
+    new_text = set_frontmatter_keys(text, updates)
+    path.write_text(new_text, encoding="utf-8")
+    sync_article_feedback(vault, {**meta, **updates})
+    return True
+
+
+def close_pending_without_data(path: Path, vault: Path, now: datetime) -> bool:
+    """用户确认不补平台数据时，关闭当前待办，但不伪造效果判断。"""
+    text = path.read_text(encoding="utf-8")
+    meta = parse_frontmatter(text)
+    if meta.get("status", "").strip() != "pending":
+        return False
+    updates = {
+        "status": "complete",
+        "feedback_stage": "closed",
+        "feedback_completed_at": iso(now),
+        "feedback_24h_status": (
+            meta.get("feedback_24h_status", "")
+            if meta.get("feedback_24h_status", "") not in {"", "pending"}
+            else "unavailable"
+        ),
+        "feedback_7d_status": (
+            meta.get("feedback_7d_status", "")
+            if meta.get("feedback_7d_status", "") not in {"", "pending"}
+            else "unavailable"
+        ),
+        "close_reason": "本轮未提供可复核的平台数据；保留发布事实，不据此判断内容效果",
+        "verdict": "data-unavailable",
+        "updated_at": iso(now),
+    }
+    for key in UNFETCHABLE_STATUS_KEYS:
+        if meta.get(key, "").strip() in {"", "pending"}:
+            updates[key] = "unavailable"
+    if "## 复盘结论" not in text:
+        text = text.rstrip("\n") + (
+            "\n\n## 复盘结论\n\n"
+            "- 结论：本轮数据不可得，不判断选题效果\n"
+            "- 理由：没有提供可复核的平台数据；保留发布事实，下一次有数据时再比较\n"
+            f"- 复盘时间：{iso(now)}\n"
+        )
+    path.write_text(set_frontmatter_keys(text, updates), encoding="utf-8")
+    sync_article_feedback(vault, {**meta, **updates})
+    return True
+
+
 def snapshot_one(path: Path, now: datetime, fetch: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
     """机械层：为一条 pending 反馈填 24h / 7d X 快照。返回动作记录。"""
     text = path.read_text(encoding="utf-8")
@@ -244,7 +400,7 @@ def snapshot_one(path: Path, now: datetime, fetch: Callable[[str], dict[str, Any
     if downgraded:
         result["actions"].append(f"平台口径标记为不可得：{'、'.join(downgraded)}")
 
-    published = parse_dt(meta.get("published_at", ""))
+    published = publication_anchor(meta)
     # public_url 可能是微信链接；X 链接也可能在 x_article_url
     tweet_id = ""
     for key in ("public_url", "x_article_url"):
@@ -300,6 +456,7 @@ def snapshot_one(path: Path, now: datetime, fetch: Callable[[str], dict[str, Any
         new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
         new_text = set_frontmatter_keys(new_text, {**updates, "updated_at": iso(now)})
         path.write_text(new_text, encoding="utf-8")
+        sync_article_feedback(path.parents[2], {**meta, **parse_frontmatter(new_text)})
     return result
 
 
@@ -313,12 +470,24 @@ def close_stale(path: Path, now: datetime) -> bool:
     if not due or now - due < timedelta(days=STALE_DAYS):
         return False
     new_text = set_frontmatter_keys(text, {
-        "status": "无需复盘",
+        "status": "not-needed",
+        "feedback_stage": "closed",
+        "feedback_24h_status": (
+            meta.get("feedback_24h_status", "")
+            if meta.get("feedback_24h_status", "") not in {"", "pending"}
+            else "not-needed"
+        ),
+        "feedback_7d_status": (
+            meta.get("feedback_7d_status", "")
+            if meta.get("feedback_7d_status", "") not in {"", "pending"}
+            else "not-needed"
+        ),
         "close_reason": f"到期超过 {STALE_DAYS} 天自动关闭（样本不足）",
         "feedback_completed_at": iso(now),
         "updated_at": iso(now),
     })
     path.write_text(new_text, encoding="utf-8")
+    sync_article_feedback(path.parents[2], {**meta, **parse_frontmatter(new_text)})
     return True
 
 
@@ -375,7 +544,13 @@ def render_board(vault: Path, now: datetime, notes: list[str]) -> str:
             and "x" not in platform.lower()
             and not any(meta.get(k, "").strip() == "pending" for k in UNFETCHABLE_STATUS_KEYS)
         )
-        if meta.get("feedback_7d_data_status", "").strip() == "captured" or no_fetchable_source:
+        if not platform:
+            waiting.append(f"- [[{rel}|{path.stem}]]：发布平台待确认；公开链接和准确时间可以留空")
+        elif not publication_anchor(meta):
+            waiting.append(f"- [[{rel}|{path.stem}]]：缺少本地发布确认时间，无法安排复盘")
+        elif due and due > now:
+            not_due.append(f"- [[{rel}|{path.stem}]]（{stage} 到期 {due_str}）")
+        elif meta.get("feedback_7d_data_status", "").strip() == "captured" or no_fetchable_source:
             metrics = last_captured_metrics(text)
             verdict, signal = interpret(metrics)
             mline = (
@@ -395,10 +570,6 @@ def render_board(vault: Path, now: datetime, notes: list[str]) -> str:
             block.append(f"  - 理由：{signal}")
             block.append("")
             ready.append("\n".join(block))
-        elif not meta.get("public_url", "").strip() and not parse_dt(meta.get("published_at", "")):
-            waiting.append(f"- [[{rel}|{path.stem}]]：缺发布链接或时间，先跑发布归档补录")
-        elif due and due > now:
-            not_due.append(f"- [[{rel}|{path.stem}]]（{stage} 到期 {due_str}）")
         else:
             waiting.append(f"- [[{rel}|{path.stem}]]（{stage} 到期 {due_str}）：数据待抓取或抓取失败，见运行日志")
 
@@ -420,7 +591,7 @@ def render_board(vault: Path, now: datetime, notes: list[str]) -> str:
     ]
     lines.extend(ready or ["- 无", ""])
     if waiting:
-        lines += [f"## 等待数据或链接（{len(waiting)} 条）", ""] + waiting + [""]
+        lines += [f"## 等待条件补齐（{len(waiting)} 条）", ""] + waiting + [""]
     if not_due:
         lines += [f"## 未到期（{len(not_due)} 条）", ""] + not_due + [""]
     if notes:
@@ -504,13 +675,15 @@ def apply_verdict(vault: Path, stem: str, verdict: str, reason: str, now: dateti
     if "## 复盘结论" not in text:
         text = text.rstrip("\n") + "\n" + "\n".join(conclusion) + "\n"
     text = set_frontmatter_keys(text, {
-        "status": "复盘完成",
+        "status": "complete",
+        "feedback_stage": "closed",
         "feedback_7d_status": "complete",
         "feedback_completed_at": iso(now),
         "verdict": verdict,
         "updated_at": iso(now),
     })
     path.write_text(text, encoding="utf-8")
+    sync_article_feedback(vault, {**meta, **parse_frontmatter(text)})
 
     # 闭环：结论追加到回写去向的长期知识
     target = knowledge_target(text)
@@ -558,10 +731,24 @@ def append_feedback_line(path: Path, line: str) -> None:
 
 # ---------- 主流程 ----------
 
-def run(vault: Path, now: datetime | None = None, fetch: Callable[[str], dict[str, Any]] | None = None) -> dict[str, Any]:
+def run(
+    vault: Path,
+    now: datetime | None = None,
+    fetch: Callable[[str], dict[str, Any]] | None = None,
+    *,
+    close_current_without_data: bool = False,
+) -> dict[str, Any]:
     now = now or datetime.now().astimezone()
     fetch = fetch or make_xurl_fetcher(load_ingest_config(vault))
+    normalized = sum(normalize_card(path, vault, now) for path in feedback_files(vault))
     notes = execute_confirmed(vault, now)
+    closed_without_data = 0
+    if close_current_without_data:
+        closed_without_data = sum(
+            close_pending_without_data(path, vault, now) for path in feedback_files(vault)
+        )
+        if closed_without_data:
+            notes.append(f"按用户确认关闭 {closed_without_data} 条无可复核平台数据的反馈")
     snapshots = 0
     errors: list[str] = []
     for path in feedback_files(vault):
@@ -578,14 +765,29 @@ def run(vault: Path, now: datetime | None = None, fetch: Callable[[str], dict[st
     board_path = vault / WORKBENCH_REL
     board_path.parent.mkdir(parents=True, exist_ok=True)
     board_path.write_text(board, encoding="utf-8")
-    return {"snapshotted": snapshots, "stale_closed": closed, "notes": notes, "errors": errors}
+    return {
+        "normalized": normalized,
+        "closed_without_data": closed_without_data,
+        "snapshotted": snapshots,
+        "stale_closed": closed,
+        "notes": notes,
+        "errors": errors,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="反馈复盘：快照 + 工作台 + 止损")
     parser.add_argument("--vault", default=str(DEFAULT_VAULT))
+    parser.add_argument(
+        "--close-current-without-data",
+        action="store_true",
+        help="关闭当前所有待反馈项，并明确记录为平台数据不可得；不生成效果判断",
+    )
     args = parser.parse_args()
-    summary = run(Path(args.vault))
+    summary = run(
+        Path(args.vault),
+        close_current_without_data=args.close_current_without_data,
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 1 if summary["errors"] else 0
 

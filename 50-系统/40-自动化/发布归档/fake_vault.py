@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# 主链：正式稿 → 写作任务 → X 书签。真实库里绝大多数稿子走这条。
+TEMPLATE_ROOT = Path(__file__).resolve().parents[2] / "30-模板"
+
+# 主链：正式稿 → 活跃母稿 → 写作任务 → X 书签。发布后母稿和任务都应退出活跃区。
 ARTICLE = """---
 kind: article-published
 status: published
@@ -15,7 +17,8 @@ title: 测试长文
 created_at: 2026-07-19
 platform: X Article，已同步微信公众号
 topic: "[[10-创作/10-灵感/20-候选选题/2026-07-19-测试候选]]"
-source: "[[90-归档/30-创作记录/写作任务/2026-07/2026-07-18-测试写作任务]]"
+content_pack: "[[10-创作/20-写作任务/2026-07-18-测试写作任务]]"
+draft_source: "[[10-创作/30-文章草稿/2026-07-19-测试长文母稿]]"
 x_article_status: draft
 x_article_editor_url: "https://x.com/compose/articles/edit/2079080041305276416"
 wechat_status: draft
@@ -26,6 +29,18 @@ wechat_draft_media_id: "MEDIA-ID"
 # 测试长文
 
 正文。
+"""
+
+ARTICLE_DRAFT = """---
+kind: article-draft
+status: published
+content_pack: "[[10-创作/20-写作任务/2026-07-18-测试写作任务]]"
+published_file: "[[40-发布/10-X长文/2026-07-19-测试长文]]"
+---
+
+# 测试长文母稿
+
+![配图](../../60-素材/配图.png)
 """
 
 CONTENT_PACK = """---
@@ -121,6 +136,7 @@ series: 测试系列
 episode: 1
 platform: "视频号；抖音；小红书"
 topic: "[[10-创作/10-灵感/20-候选选题/2026-07-19-测试候选]]"
+oral_script: "[[10-创作/25-口播草稿/2026-07-24-测试口播母稿]]"
 shipinhao_status: draft
 douyin_status: draft
 xiaohongshu_status: draft
@@ -131,10 +147,23 @@ xiaohongshu_status: draft
 逐字稿正文。
 """
 
+ORAL_DRAFT = """---
+kind: oral-script
+status: published
+published_file: "[[40-发布/50-口播视频/2026-07-24-测试口播]]"
+---
+
+# 测试口播母稿
+
+逐字稿正文。
+"""
+
 FILES = {
     "article": ("40-发布/10-X长文/2026-07-19-测试长文.md", ARTICLE),
+    "draft": ("10-创作/30-文章草稿/2026-07-19-测试长文母稿.md", ARTICLE_DRAFT),
     "video": ("40-发布/50-口播视频/2026-07-24-测试口播.md", VIDEO_SCRIPT),
-    "pack": ("90-归档/30-创作记录/写作任务/2026-07/2026-07-18-测试写作任务.md", CONTENT_PACK),
+    "oral_draft": ("10-创作/25-口播草稿/2026-07-24-测试口播母稿.md", ORAL_DRAFT),
+    "pack": ("10-创作/20-写作任务/2026-07-18-测试写作任务.md", CONTENT_PACK),
     "review": ("90-归档/20-审核记录/剪藏复核/2026-07/测试审核卡-0e3e62d4.md", REVIEW_CARD),
     "bookmark": ("30-资料/30-X书签/2026-07/2026-07-18-测试书签.md", BOOKMARK),
     "topic": ("10-创作/10-灵感/20-候选选题/2026-07-19-测试候选.md", TOPIC),
@@ -151,5 +180,12 @@ def build(root: Path) -> dict[str, Path]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
         paths[key] = path
+    image = root / "60-素材/配图.png"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"test-image")
     (root / "40-发布/00-内容反馈").mkdir(parents=True, exist_ok=True)
+    for name in ("内容反馈.md", "口播视频反馈.md"):
+        target = root / "50-系统/30-模板" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((TEMPLATE_ROOT / name).read_text(encoding="utf-8"), encoding="utf-8")
     return paths

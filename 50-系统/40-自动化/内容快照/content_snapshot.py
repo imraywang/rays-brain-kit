@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_VAULT = Path(__file__).resolve().parent.parent.parent.parent
+DEFAULT_VAULT = (
+    Path.home()
+    / "Library/Mobile Documents/iCloud~md~obsidian/Documents/rays-brain"
+)
 VAULT = Path(os.environ.get("RAYS_BRAIN", str(DEFAULT_VAULT))).resolve()
 STATE_DIR = Path(
     os.environ.get(
@@ -33,15 +36,14 @@ CONTENT_PATHS = (
     "20-知识",
     "30-资料",
     "40-发布",
-    "60-素材",
     "70-思考",
     "90-归档",
     "HOME.md",
     "README.md",
 )
 ALLOWED_PATH = re.compile(
-    r"^(?:00-入口|10-创作|20-知识|30-资料|40-发布|60-素材|"
-    r"70-思考|90-归档)/|^(?:HOME|README)\.md$"
+    r"^(?:00-入口|10-创作|20-知识|30-资料|40-发布|70-思考|"
+    r"90-归档)/|^(?:HOME|README)\.md$"
 )
 
 
@@ -238,8 +240,14 @@ def run_snapshot() -> int:
         else:
             log("未找到 WEREAD_API_KEY，跳过微信读书同步")
 
-        git("add", "-A", "--", *CONTENT_PATHS)
         staged_by_this_run = True
+        try:
+            git("add", "-A", "--", *CONTENT_PATHS)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()
+            raise RuntimeError(
+                "内容加入快照失败" + (f"：{detail}" if detail else "")
+            ) from exc
         staged_files = staged_paths()
         unexpected = [path for path in staged_files if not ALLOWED_PATH.search(path)]
         if unexpected:

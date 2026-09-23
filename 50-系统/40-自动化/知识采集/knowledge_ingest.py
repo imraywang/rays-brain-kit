@@ -58,7 +58,7 @@ MAP_DIGEST_WEEKLY_DIR = VAULT / "00-入口/20-日报/知识地图整理"
 LEGACY_ACTIONS_SCRIPT = SYSTEM_DIR / "legacy_actions.py"
 TOPIC_FRESHNESS_DAYS = {"强时效": 3, "中时效": 14, "常青": 30}
 ARTICLE_DRAFT_DIR = VAULT / "10-创作/30-文章草稿"
-ORAL_DRAFT_DIR = VAULT / "10-创作/20-口播草稿"
+ORAL_DRAFT_DIR = VAULT / "10-创作/25-口播草稿"
 PUBLISHED_ROOT = VAULT / "40-发布"
 FEEDBACK_REL_PREFIX = "40-发布/00-内容反馈"
 RECORD_PUBLISHED_SCRIPT = SYSTEM_DIR.parent / "发布归档/record_published.py"
@@ -1093,6 +1093,55 @@ def run_record_published(article: Path, url: str, published_at: str, dry_run: bo
     return proc.stdout
 
 
+def run_published_closeout(article: Path, published_at: str, dry_run: bool) -> str:
+    """正式稿已经登记过发布时，只补做母稿与成稿包归档。"""
+    if not RECORD_PUBLISHED_SCRIPT.is_file():
+        raise RuntimeError(f"找不到发布归档脚本：{RECORD_PUBLISHED_SCRIPT}")
+    cmd = [
+        sys.executable,
+        str(RECORD_PUBLISHED_SCRIPT),
+        "--article",
+        rel(article),
+        "--closeout-only",
+    ]
+    if published_at:
+        cmd.extend(["--published-at", published_at])
+    if dry_run:
+        cmd.append("--dry-run")
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        env={**os.environ, "RAYS_BRAIN": str(VAULT)},
+        cwd=str(RECORD_PUBLISHED_SCRIPT.parent),
+    )
+    if proc.returncode != 0:
+        detail = " / ".join(line.strip() for line in proc.stderr.splitlines() if line.strip())
+        raise RuntimeError(detail[-500:] or "record_published closeout failed")
+    return proc.stdout
+
+
+def connect_article_to_active_draft(
+    article: Path, draft_path: Path, draft_meta: dict[str, str], dry_run: bool
+) -> list[str]:
+    """补齐旧正式稿缺失的来源关系，让统一收尾脚本能找到活跃母稿。"""
+    text = article.read_text(encoding="utf-8")
+    meta = parse_frontmatter(text)
+    updates: dict[str, str] = {}
+    if not meta.get("draft_source", "").strip() and not meta.get("oral_script", "").strip():
+        source_key = "oral_script" if draft_path.is_relative_to(ORAL_DRAFT_DIR) else "draft_source"
+        updates[source_key] = f"[[{rel(draft_path)[:-3]}]]"
+    if not meta.get("content_pack", "").strip() and draft_meta.get("content_pack", "").strip():
+        updates["content_pack"] = draft_meta["content_pack"]
+    if updates and not dry_run:
+        article.write_text(
+            update_frontmatter(text, updates, render=frontmatter_value),
+            encoding="utf-8",
+        )
+    return list(updates)
+
+
 def writeback_draft_and_pack(
     draft_path: Path, article: Path, url: str, published_at: str, dry_run: bool
 ) -> list[str]:
@@ -1151,9 +1200,20 @@ def handle_x_article_hit(item: dict[str, Any], url: str, published_at: str, dry_
         for line in report.splitlines():
             if line.strip():
                 log(f"record_published: {line.rstrip()}")
-    updated = writeback_draft_and_pack(path, article, url, published_at, dry_run)
+    # 正式登记会把母稿和成稿包一起移入归档区；不能再拿旧路径回写，
+    # 否则发布其实已经完成，却会因为源文件已移动而被误报成失败。
+    updated = (
+        writeback_draft_and_pack(path, article, url, published_at, dry_run)
+        if dry_run
+        else []
+    )
     prefix = "x article detect dry-run: 检测到已发布" if dry_run else "x article detect: 已登记发布"
-    log(f"{prefix} {rel(path)} → {url}（回写 {', '.join(updated) or '无需改动'}）")
+    detail = (
+        f"预演回写 {', '.join(updated) or '无需改动'}"
+        if dry_run
+        else "正式稿、反馈记录与源文件归档均已完成"
+    )
+    log(f"{prefix} {rel(path)} → {url}（{detail}）")
 
 
 def detect_x_article_publications(config: dict[str, Any], dry_run: bool = False) -> dict[str, int]:
@@ -1170,18 +1230,30 @@ def detect_x_article_publications(config: dict[str, Any], dry_run: bool = False)
         if article is not None:
             ameta = parse_frontmatter(article.read_text(encoding="utf-8", errors="replace"))
             if ameta.get("x_article_status", "").strip() == "published":
-                updated = writeback_draft_and_pack(
-                    item["path"],
-                    article,
-                    ameta.get("x_article_url", "").strip(),
-                    ameta.get("x_article_published_at", "").strip(),
-                    dry_run,
-                )
+                try:
+                    linked = connect_article_to_active_draft(
+                        article, item["path"], item["meta"], dry_run
+                    )
+                    report = run_published_closeout(
+                        article,
+                        ameta.get("x_article_published_at", "").strip(),
+                        dry_run,
+                    )
+                    for line in report.splitlines():
+                        if line.strip():
+                            log(f"record_published closeout: {line.rstrip()}")
+                except Exception as exc:
+                    result["errors"] += 1
+                    log(
+                        f"x article detect: 正式稿已登记，但自动收尾失败 "
+                        f"{rel(item['path'])}: {exc}"
+                    )
+                    continue
                 result["reconciled"] += 1
                 suffix = "（dry-run 未写入）" if dry_run else ""
                 log(
-                    f"x article detect: 正式稿已登记过发布，关闭草稿检测门 "
-                    f"{rel(item['path'])}（回写 {', '.join(updated) or '无需改动'}）{suffix}"
+                    f"x article detect: 正式稿已登记过发布，完成源文件归档 "
+                    f"{rel(item['path'])}（补齐 {', '.join(linked) or '无需补字段'}）{suffix}"
                 )
                 continue
         remaining.append(item)
@@ -5459,6 +5531,7 @@ def write_review_card(
 
 def review_pending(state: dict[str, Any], config: dict[str, Any]) -> int:
     pending = []
+    already_processed_ids: set[str] = set()
     for source_rel in list(dict.fromkeys(state["pending_sources"])):
         path = VAULT / source_rel
         if not path.exists():
@@ -5467,8 +5540,23 @@ def review_pending(state: dict[str, Any], config: dict[str, Any]) -> int:
         item_id = source_id(path, text)
         if item_id in state["reviewed_sources"]:
             continue
+        # 运行时状态可以因恢复或旧版本迁移丢失，但来源卡上的 processed 是持久事实。
+        # 已处理来源不得再次送给模型，避免同一条资料反复超时和重复计费。
+        if parse_frontmatter(text).get("processing_status", "").strip().lower() == "processed":
+            already_processed_ids.add(item_id)
+            continue
         pending.append({"id": item_id, "file": source_rel, "content": text})
     if not pending:
+        if already_processed_ids:
+            state["pending_sources"] = [
+                source_rel
+                for source_rel in state["pending_sources"]
+                if not (VAULT / source_rel).is_file()
+                or source_id(
+                    VAULT / source_rel,
+                    (VAULT / source_rel).read_text(encoding="utf-8", errors="replace"),
+                ) not in already_processed_ids
+            ]
         for error in state["errors"]:
             if error.get("message", "").startswith("review failed:") and not error.get("resolved_at"):
                 error["resolved_at"] = now_local()
@@ -5547,7 +5635,7 @@ def review_pending(state: dict[str, Any], config: dict[str, Any]) -> int:
             if error.get("message", "").startswith(prefix) and not error.get("resolved_at"):
                 error["resolved_at"] = now_local()
         count += 1
-    reviewed_ids = set(state["reviewed_sources"])
+    reviewed_ids = set(state["reviewed_sources"]) | already_processed_ids
     remaining = []
     for source_rel in state["pending_sources"]:
         source_path = VAULT / source_rel
