@@ -600,6 +600,53 @@ def knowledge_provenance_issues() -> list[dict[str, Any]]:
     return issues
 
 
+def review_source_issues() -> list[dict[str, Any]]:
+    """待审核卡的来源文件必须存在；被移走时按 corpus_source 或 source_url 给出可找回的路径。"""
+    issues: list[dict[str, Any]] = []
+    if not REVIEW_DIR.exists():
+        return issues
+    corpus_dir = VAULT / "30-资料/70-人物语料"
+    web_dir = VAULT / "30-资料/40-网页剪藏"
+    url_index: dict[str, str] | None = None
+
+    def lookup(url: str) -> str:
+        nonlocal url_index
+        if url_index is None:
+            url_index = {}
+            candidates = list(web_dir.glob("*.md")) if web_dir.exists() else []
+            if corpus_dir.exists():
+                candidates.extend(corpus_dir.rglob("*.md"))
+            for candidate in sorted(candidates):
+                candidate_meta = parse_frontmatter(
+                    candidate.read_text(encoding="utf-8", errors="replace")
+                )
+                candidate_url = candidate_meta.get("source_url", "").strip().strip('"')
+                if candidate_url:
+                    url_index.setdefault(candidate_url, candidate.relative_to(VAULT).as_posix())
+        return url_index.get(url, "")
+
+    for path in sorted(REVIEW_DIR.glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        meta = parse_frontmatter(text)
+        if meta.get("kind", "").strip().strip('"') != "capture-review":
+            continue
+        if meta.get("status", "").strip().strip('"') != "待审核":
+            continue
+        source_file = meta.get("source_file", "").strip().strip('"')
+        if source_file and (VAULT / source_file).is_file():
+            continue
+        corpus = meta.get("corpus_source", "").strip().strip('"')
+        suggested = corpus if corpus and (VAULT / corpus).is_file() else ""
+        if not suggested:
+            suggested = lookup(meta.get("source_url", "").strip().strip('"'))
+        issues.append({
+            "file": path.relative_to(VAULT).as_posix(),
+            "issue": f"来源文件不存在：{source_file or '未声明'}",
+            "suggested_source": suggested,
+        })
+    return issues
+
+
 def knowledge_backfill_issues() -> list[dict[str, Any]]:
     active_knowledge = [
         (path, path.read_text(encoding="utf-8", errors="replace"))
@@ -1077,6 +1124,7 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
     underlinked_knowledge = knowledge_link_issues()
     entity_issues = entity_identity_issues()
     provenance_issues = knowledge_provenance_issues()
+    review_source = review_source_issues()
     backfill_issues = knowledge_backfill_issues()
     handoff_issues = writing_knowledge_handoff_issues()
     topic_knowledge_issues = topic_knowledge_reference_issues()
@@ -1128,6 +1176,8 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
         "entity_identity_issues": entity_issues,
         "knowledge_provenance_issue_count": len(provenance_issues),
         "knowledge_provenance_issues": provenance_issues,
+        "review_source_issue_count": len(review_source),
+        "review_source_issues": review_source,
         "knowledge_backfill_issue_count": len(backfill_issues),
         "knowledge_backfill_issues": backfill_issues,
         "writing_knowledge_handoff_issue_count": len(handoff_issues),
@@ -1195,6 +1245,10 @@ def creation_alerts(metrics: dict[str, Any]) -> list[str]:
     if metrics.get("knowledge_provenance_issue_count", 0):
         reasons.append(
             f"有 {metrics['knowledge_provenance_issue_count']} 篇长期知识来源缺失或失效"
+        )
+    if metrics.get("review_source_issue_count", 0):
+        reasons.append(
+            f"有 {metrics['review_source_issue_count']} 张待审核卡的来源文件不存在"
         )
     if metrics.get("knowledge_backfill_issue_count", 0):
         reasons.append(
@@ -1834,6 +1888,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         f"| 对象重复、错位或身份缺失 | {metrics.get('entity_identity_issue_count', 0)} | 人物、组织、产品和模型应各有唯一稳定档案 |",
         f"| 少于 2 条知识连接 | {metrics.get('underlinked_knowledge_count', 0)} | 长期知识缺少足够内部连接 |",
         f"| 来源缺失或失效 | {metrics.get('knowledge_provenance_issue_count', 0)} | 长期知识必须能回到原始资料 |",
+        f"| 审核卡来源失效 | {metrics.get('review_source_issue_count', 0)} | 待审核卡必须能打开原文；被移走时按 source_url 找回 |",
         f"| 发布回写不一致 | {metrics.get('knowledge_backfill_issue_count', 0)} | 已标记回写却没有知识引用 |",
         f"| 写作知识漏接 | {metrics.get('writing_knowledge_handoff_issue_count', 0)} | 写作任务应继承候选中的可调用知识 |",
         f"| 候选知识去向失效 | {metrics.get('topic_knowledge_reference_issue_count', 0)} | 已沉淀候选必须指向活跃知识 |",
@@ -1912,6 +1967,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         ("对象档案异常", metrics.get("entity_identity_issues", [])),
         ("连接不足的长期知识", metrics.get("underlinked_knowledge", [])),
         ("来源缺失或失效的长期知识", metrics.get("knowledge_provenance_issues", [])),
+        ("来源失效的待审核卡", metrics.get("review_source_issues", [])),
         ("发布回写状态不一致", metrics.get("knowledge_backfill_issues", [])),
         ("写作任务知识漏接", metrics.get("writing_knowledge_handoff_issues", [])),
         ("候选知识去向失效", metrics.get("topic_knowledge_reference_issues", [])),
@@ -1948,6 +2004,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "- 活跃审核目录中的已处理卡：已执行分流但仍留在活跃审核入口的卡片。",
         "- 少于 2 条知识连接：长期知识正文中指向其他长期知识的有效内部链接不足 2 条。",
         "- 来源缺失或失效：长期知识没有声明原始资料，或声明的本地资料已经不存在。",
+        "- 审核卡来源失效：待审核卡的 source_file 已不存在，多半是剪藏副本被移走或改名；沉淀时脚本会按 corpus_source 或 source_url 找回，快照里附带建议路径。",
         "- 发布回写不一致：发布稿标记为已经回写知识，但没有任何有效长期知识引用该发布稿。",
         "- 写作知识漏接：候选中已列出的可调用知识，没有随选定角度进入当前写作任务。",
         "- 候选知识去向失效：候选标记为已沉淀，但对应知识为空、不存在或只在待清理区。",

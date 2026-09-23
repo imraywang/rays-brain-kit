@@ -2321,7 +2321,50 @@ def knowledge_origin(source_file: str) -> str:
         return "web-clip"
     if "50-读书划线" in source_file:
         return "weread"
+    if "70-人物语料" in source_file:
+        return "person-corpus"
     return "capture"
+
+
+def person_corpus_dir() -> Path:
+    """L0 人物语料区；按调用时的 VAULT 计算，便于测试替换根目录。"""
+    return VAULT / "30-资料/70-人物语料"
+
+
+def corpus_source_for(source_meta: dict[str, str]) -> str:
+    """Gather 晋升到剪藏区的副本会声明 corpus_source，指向 L0 原件；只有原件存在才采用。"""
+    value = source_meta.get("corpus_source", "").strip().strip('"')
+    if value and (VAULT / value).is_file():
+        return value
+    return ""
+
+
+def find_source_by_url(source_url: str) -> str:
+    """按 source_url 在剪藏区和人物语料区找同一来源的本地原文。"""
+    target = source_url.strip().strip('"')
+    if not target:
+        return ""
+    roots = [WEB_DIR.glob("*.md"), person_corpus_dir().rglob("*.md")]
+    for candidates in roots:
+        for path in sorted(candidates):
+            try:
+                meta = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if meta.get("source_url", "").strip().strip('"') == target:
+                return rel(path)
+    return ""
+
+
+def resolve_source_file(meta: dict[str, str]) -> str:
+    """来源文件被移走或改名时，先看 corpus_source，再按 source_url 找回；找不到则原样返回。"""
+    source_file = meta.get("source_file", "").strip().strip('"')
+    if source_file and (VAULT / source_file).is_file():
+        return source_file
+    corpus = corpus_source_for(meta)
+    if corpus:
+        return corpus
+    return find_source_by_url(meta.get("source_url", "")) or source_file
 
 
 def entity_name_key(value: str) -> str:
@@ -2939,6 +2982,10 @@ def create_knowledge_notes(
     units = knowledge_units_from_card(text, meta)
     declared_entities = entities_from_card(meta)
     entities = list(declared_entities)
+    resolved_source = resolve_source_file(meta)
+    if resolved_source and resolved_source != meta.get("source_file", "").strip().strip('"'):
+        log(f"审核卡来源已改名或移动，按 corpus_source / source_url 找回：{resolved_source}")
+        meta["source_file"] = resolved_source
     source_file = meta.get("source_file", "")
     source_path = VAULT / source_file
     source_text = ""
@@ -5379,6 +5426,7 @@ def write_review_card(
     source_meta = parse_frontmatter(item["content"])
     source_url = source_meta.get("source_url", "") or source_meta.get("source", "")
     source_date = source_published_at(item["file"])
+    corpus_source = corpus_source_for(source_meta)
     personal_context = personal_context_from_source(item["content"])
     suggested_kind = review["suggested_kind"]
     knowledge_units = normalized_knowledge_units(review)
@@ -5425,7 +5473,8 @@ def write_review_card(
         f"personal_context_status: {'captured' if personal_context else 'missing'}",
         f"knowledge_units_json: {yaml_string(json_meta(knowledge_units))}",
         f"entities_json: {yaml_string(json_meta(entities))}",
-        f"source_file: {yaml_string(item['file'])}",
+        f"source_file: {yaml_string(corpus_source or item['file'])}",
+        *([f"review_source: {yaml_string(item['file'])}"] if corpus_source else []),
         f"source_url: {yaml_string(source_url)}",
         f"source_published_at: {yaml_string(source_date)}",
         f"capture_id: {yaml_string(item['id'])}",

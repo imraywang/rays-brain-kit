@@ -381,6 +381,39 @@ freshness_status: stale
         self.assertEqual(len(handoff), 1)
         self.assertEqual(handoff[0]["missing"], ["有效知识"])
 
+    def test_review_source_issue_suggests_corpus_file_by_url(self) -> None:
+        self.write(
+            "30-资料/70-人物语料/Dan Koe/youtube/2026-09-20-原文.md",
+            self.note('title: "原文"\nsource_url: "https://youtube.com/watch?v=abc"'),
+        )
+        self.write(
+            "30-资料/40-网页剪藏/2026-09-21-在的剪藏.md",
+            self.note('title: "在的"\nsource_url: "https://example.com/ok"'),
+        )
+        self.write(
+            "10-创作/10-灵感/10-待评估/剪藏复核/2026-09-21-来源被移走-aaaa1111.md",
+            self.note(
+                "kind: capture-review\nstatus: 待审核\n"
+                'source_file: "30-资料/40-网页剪藏/2026-09-20-原文-aaaa1111.md"\n'
+                'source_url: "https://youtube.com/watch?v=abc"'
+            ),
+        )
+        self.write(
+            "10-创作/10-灵感/10-待评估/剪藏复核/2026-09-21-来源健在-bbbb2222.md",
+            self.note(
+                "kind: capture-review\nstatus: 待审核\n"
+                'source_file: "30-资料/40-网页剪藏/2026-09-21-在的剪藏.md"\n'
+                'source_url: "https://example.com/ok"'
+            ),
+        )
+        issues = health.review_source_issues()
+        self.assertEqual(len(issues), 1)
+        self.assertIn("来源被移走", issues[0]["file"])
+        self.assertEqual(
+            issues[0]["suggested_source"],
+            "30-资料/70-人物语料/Dan Koe/youtube/2026-09-20-原文.md",
+        )
+
     def test_provenance_accepts_escaped_quotes_in_source_filename(self) -> None:
         source = '30-资料/Sam Altman "Startup".md'
         self.write(source, self.note("kind: source\nstatus: captured", "原始资料"))

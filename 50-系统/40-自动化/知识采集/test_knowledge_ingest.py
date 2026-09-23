@@ -1508,6 +1508,45 @@ Sam Altman 谈创业、组织和仍未回答的问题。
         )
         return card
 
+    def test_review_card_points_to_corpus_original_when_clip_declares_it(self) -> None:
+        corpus = self.vault / "30-资料/70-人物语料/Sam Altman/youtube/2026-07-20-访谈.md"
+        corpus.parent.mkdir(parents=True, exist_ok=True)
+        corpus.write_text(
+            '---\ntitle: "访谈"\nsource_url: "https://example.com/talk"\n'
+            "capture_source: agent-gather\nlayer: L0\n---\n\n原文。\n",
+            encoding="utf-8",
+        )
+        clip = ingest.WEB_DIR / "2026-07-21-访谈-abcd1234.md"
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        clip.write_text(
+            '---\ntitle: "访谈"\nsource_url: "https://example.com/talk"\n'
+            f'corpus_source: "{ingest.rel(corpus)}"\n'
+            "capture_source: agent-gather\nprocessing_status: unprocessed\n---\n\n原文。\n",
+            encoding="utf-8",
+        )
+        item = {"id": "file:clip", "file": ingest.rel(clip), "content": clip.read_text(encoding="utf-8")}
+        card = ingest.write_review_card(self.review("file:clip"), item)
+        meta = ingest.parse_frontmatter(card.read_text(encoding="utf-8"))
+        self.assertEqual(meta["source_file"].strip('"'), ingest.rel(corpus))
+        self.assertEqual(meta["review_source"].strip('"'), ingest.rel(clip))
+        self.assertEqual(meta["capture_id"].strip('"'), "file:clip")
+
+    def test_resolve_source_file_falls_back_to_corpus_by_url(self) -> None:
+        corpus = self.vault / "30-资料/70-人物语料/Sam Altman/youtube/2026-07-20-访谈.md"
+        corpus.parent.mkdir(parents=True, exist_ok=True)
+        corpus.write_text(
+            '---\ntitle: "访谈"\nsource_url: "https://example.com/talk"\n---\n\n原文。\n',
+            encoding="utf-8",
+        )
+        meta = {
+            "source_file": "30-资料/40-网页剪藏/2026-07-21-访谈-abcd1234.md",
+            "source_url": "https://example.com/talk",
+        }
+        self.assertEqual(ingest.resolve_source_file(meta), ingest.rel(corpus))
+        self.assertEqual(ingest.knowledge_origin(ingest.rel(corpus)), "person-corpus")
+        missing = {"source_file": "30-资料/40-网页剪藏/不存在.md", "source_url": "https://example.com/none"}
+        self.assertEqual(ingest.resolve_source_file(missing), "30-资料/40-网页剪藏/不存在.md")
+
     def test_review_card_keeps_all_units_and_entities_visible(self) -> None:
         card = self.write_card()
         text = card.read_text(encoding="utf-8")
