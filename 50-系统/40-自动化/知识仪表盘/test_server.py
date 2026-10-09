@@ -1221,6 +1221,40 @@ published_at: "2026-09-01T00:00:00+00:00"
         self.assertEqual([g["label"] for g in groups], ["无法解析的链接"])
         self.assertTrue(groups[0]["items"][0]["openable"])
 
+    def test_current_focus_ranks_matching_reviews_first(self) -> None:
+        self.write_note(dashboard.CURRENT_FOCUS_REL, """---
+kind: current-focus
+review_after: 2000-01-01
+---
+
+# 当前关注
+
+## 1. 押口播线
+
+- 关键词：口播，开头留存
+- 这阵子不做：
+
+## 2. （可留空）
+
+- 关键词：不该生效
+
+## 写法说明
+
+- 关键词：也不该生效
+""")
+        focus = dashboard.load_current_focus()
+        self.assertEqual(focus["items"], [{"title": "押口播线", "keywords": ["口播", "开头留存"]}])
+        self.assertTrue(focus["stale"])
+        (self.review_dir / "低分命中.md").write_text(
+            "---\nkind: capture-review\nstatus: 待审核\nrelevance_score: 60\n---\n\n# 口播开头怎么写\n\n## 摘要\n\n无\n",
+            encoding="utf-8",
+        )
+        payload = dashboard.dashboard_payload()
+        self.assertEqual(payload["reviews"][0]["title"], "口播开头怎么写")
+        self.assertEqual(payload["reviews"][0]["focus_hits"], ["押口播线"])
+        self.assertEqual(payload["reviews"][1]["focus_hits"], [])
+        self.assertEqual(payload["current_focus"]["path"], dashboard.CURRENT_FOCUS_REL)
+
     def test_review_card_points_to_local_source(self) -> None:
         self.write_note("30-资料/30-X书签/原帖.md", "# 原帖\n")
         text = self.card.read_text(encoding="utf-8")

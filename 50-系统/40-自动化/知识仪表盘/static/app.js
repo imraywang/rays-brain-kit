@@ -237,6 +237,7 @@ function renderDashboard() {
   $("#focus-note").textContent = `${healthNote}${data.focus_hint || ""}`
     || "当前流程通畅，可以把注意力放在真正值得推进的材料上。";
   $("#hero-count").textContent = String(data.focus_count ?? counts.decision_pending).padStart(2, "0");
+  renderFocusBets(data.current_focus);
   $("#hero-label").textContent = data.focus_label || "等待判断";
   $("#hero-index").dataset.target = data.focus_target || "";
   $("#capture-inbox").href = data.inbox_uri;
@@ -252,6 +253,26 @@ function renderDashboard() {
   renderPerformance();
   renderIssues();
   renderRecent();
+}
+
+// 首页「当前关注」：两三条押注方向；没写或过期时给一个去写的入口。
+function renderFocusBets(focus) {
+  const box = $("#focus-bets");
+  if (!focus?.path) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const items = focus.items || [];
+  const link = (label) => `<a href="#" data-note-path="${escapeHtml(focus.path)}">${label}</a>`;
+  if (!items.length) {
+    box.innerHTML = `<span class="bets-label">当前关注</span><span class="bets-empty">还没写。写下这几周押注的两三个方向，资料和选题会按它排序 ${link("去写 →")}</span>`;
+    return;
+  }
+  box.innerHTML = `
+    <span class="bets-label">当前关注</span>
+    ${items.map((item) => `<span class="bet">${escapeHtml(item.title)}</span>`).join("")}
+    ${focus.stale ? `<span class="bets-stale">已过复查日 ${escapeHtml(focus.review_after)}，该重写了 ${link("打开 →")}</span>` : link("查看 →")}`;
 }
 
 /* ---- 侧栏工作篮 ---- */
@@ -386,6 +407,7 @@ function renderReview() {
     <div class="review-meta">
       <span class="score" aria-label="相关度 ${item.score} 分">${item.score}</span>
       <span class="tag">${escapeHtml(item.recommendation)}</span>
+      ${item.focus_hits?.length ? `<span class="tag focus" title="当前关注">对上关注：${escapeHtml(item.focus_hits.join("、"))}</span>` : ""}
       ${item.kind ? `<span class="tag">${escapeHtml(item.kind)}</span>` : ""}
       ${Number(item.knowledge_unit_count) ? `<span class="tag">${Number(item.knowledge_unit_count)} 个知识单元</span>` : ""}
       ${Number(item.entity_count) ? `<span class="tag">${Number(item.entity_count)} 个相关对象</span>` : ""}
@@ -522,6 +544,9 @@ function boardCard(item, column) {
   }
   if ((column === "topics" || column === "continuations" || column === "tasks") && Number(item.priority_score)) {
     props.push(`<span class="kprop score">优先 ${Number(item.priority_score)}</span>`);
+  }
+  if (item.focus_hits?.length) {
+    props.push(`<span class="kprop focus" title="${escapeHtml(item.focus_hits.join("；"))}">对上关注</span>`);
   }
   if (column === "tasks") {
     const statusLabel = statusLabelOf(item.kind, item.status);

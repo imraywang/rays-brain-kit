@@ -61,6 +61,8 @@ STATE_HOME = Path(
 TOPIC_MAP_CANDIDATE_STATE = STATE_HOME / "topic-map-candidates.json"
 TOPIC_MAP_CANDIDATE_NOTE_REL = "00-入口/10-工作台/主题地图候选.md"
 MAP_DIGEST_NOTE_REL = "00-入口/10-工作台/知识地图整理.md"
+CURRENT_FOCUS_REL = "70-思考/当前关注.md"
+PRINCIPLES_REL = "70-思考/原则.md"
 if str(INGEST_SCRIPT.parent) not in sys.path:
     sys.path.insert(0, str(INGEST_SCRIPT.parent))
 try:
@@ -919,6 +921,63 @@ def load_feedback(files: list[Path], limit: int = 80) -> list[dict[str, object]]
     return rows
 
 
+# ---------- 当前关注：让排序知道 Ray 这几周押注什么，而不只看分数和截止日期 ----------
+
+FOCUS_ITEM = re.compile(r"^##\s+\d+\.\s*(.*?)\s*$")
+FOCUS_PLACEHOLDER = re.compile(r"^[（(].*[)）]$")
+
+
+def load_current_focus() -> dict[str, object]:
+    path = VAULT / CURRENT_FOCUS_REL
+    text = try_read(path) if path.is_file() else None
+    if text is None:
+        return {"path": "", "items": [], "stale": False, "updated_at": "", "review_after": ""}
+    meta = parse_frontmatter(text)
+    items: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    for line in without_frontmatter(text).splitlines():
+        heading = FOCUS_ITEM.match(line)
+        if heading:
+            title = heading.group(1).strip()
+            current = {"title": title, "keywords": []} if title and not FOCUS_PLACEHOLDER.match(title) else None
+            if current:
+                items.append(current)
+            continue
+        if line.startswith("## "):
+            current = None
+            continue
+        keywords = re.match(r"^\s*-\s*关键词：(.*)$", line)
+        if current is not None and keywords:
+            current["keywords"] = [
+                word.strip() for word in re.split(r"[，,、/；;]", keywords.group(1)) if len(word.strip()) >= 2
+            ]
+    review_after = meta.get("review_after", "")
+    return {
+        "path": CURRENT_FOCUS_REL,
+        "items": items[:3],
+        "updated_at": meta.get("updated_at", ""),
+        "review_after": review_after,
+        "stale": bool(items) and bool(review_after) and review_after < date.today().isoformat(),
+    }
+
+
+def focus_hits(item: dict[str, object], focus: dict[str, object]) -> list[str]:
+    """命中哪几条当前关注：关键词出现在标题或摘要里即算。"""
+    haystack = f"{item.get('title', '')} {item.get('summary', '')}".casefold()
+    return [
+        str(entry["title"])
+        for entry in focus.get("items", [])  # type: ignore[union-attr]
+        if any(str(word).casefold() in haystack for word in entry.get("keywords", []))  # type: ignore[union-attr]
+    ]
+
+
+def apply_focus(rows: list[dict[str, object]], focus: dict[str, object]) -> list[dict[str, object]]:
+    """标出命中项并稳定上移：同为命中或同为未命中时保留原有排序。"""
+    for row in rows:
+        row["focus_hits"] = focus_hits(row, focus)
+    return sorted(rows, key=lambda row: not row["focus_hits"])
+
+
 def dashboard_payload() -> dict[str, object]:
     files = markdown_files()
     reviews = load_reviews()
@@ -931,6 +990,11 @@ def dashboard_payload() -> dict[str, object]:
     feedback = load_feedback(files, len(files))
     feedback_pending = [item for item in feedback if item["pending"]]
     drafts = load_drafts(files, len(files))
+    current_focus = load_current_focus()
+    decision_pending = apply_focus(decision_pending, current_focus)
+    topic_candidates = apply_focus(topic_candidates, current_focus)
+    topic_continuations = apply_focus(topic_continuations, current_focus)
+    drafts = apply_focus(drafts, current_focus)
     published = notes_under(
         files,
         area_prefix("published_dir"),
@@ -995,6 +1059,8 @@ def dashboard_payload() -> dict[str, object]:
             {"title": "健康日报", "path": "00-入口/20-日报/知识库健康日报/最新健康日报.md"},
             {"title": "知识库周报", "path": "00-入口/20-日报/知识库周报/最新知识库周报.md"},
             {"title": "主题地图候选", "path": TOPIC_MAP_CANDIDATE_NOTE_REL},
+            {"title": "当前关注", "path": CURRENT_FOCUS_REL},
+            {"title": "原则", "path": PRINCIPLES_REL},
             {"title": "知识地图整理", "path": MAP_DIGEST_NOTE_REL},
         )
         if (VAULT / entry["path"]).is_file()
@@ -1099,6 +1165,7 @@ def dashboard_payload() -> dict[str, object]:
         },
         "reports": reports,
         "focus": focus,
+        "current_focus": current_focus,
         "focus_count": focus_count,
         "focus_label": focus_label,
         "focus_hint": focus_hint,

@@ -1223,3 +1223,13 @@ a.perf-row:hover { background: var(--hover); }
 .confirm-item { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start; line-height: 1.6; cursor: pointer; }
 .confirm-item input { margin-top: 4px; accent-color: var(--accent); }
 .confirm-item.done span { color: var(--muted); text-decoration: line-through; }
+
+/* ---- 当前关注 ---- */
+
+.focus-bets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 14px; font-size: 12px; }
+.bets-label { color: var(--muted); font-size: 11px; font-weight: 650; }
+.bet { padding: 3px 9px; border-radius: 999px; color: var(--purple); background: var(--purple-soft); font-weight: 600; }
+.bets-empty, .bets-stale { color: var(--muted-strong); }
+.bets-stale { color: var(--orange); }
+.focus-bets a { color: var(--accent); text-decoration: none; }
+.kprop.focus, .tag.focus { color: var(--purple); background: var(--purple-soft); }
