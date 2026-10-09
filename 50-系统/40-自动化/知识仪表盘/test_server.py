@@ -357,6 +357,11 @@ source_url: "https://example.com"
             "---\nkind: oral-script\nstatus: published\n---\n\n# 不应混入母稿\n",
             encoding="utf-8",
         )
+        # ray-kb 写的 koubo-draft 与 oral-script 同义，也必须出现。
+        (oral_dir / "快速口播.md").write_text(
+            "---\nkind: koubo-draft\nstatus: draft\n---\n\n# 一篇快速口播\n",
+            encoding="utf-8",
+        )
         published_dir = self.vault / "40-发布/10-公众号"
         published_dir.mkdir(parents=True)
         (published_dir / "成稿.md").write_text(
@@ -413,7 +418,7 @@ source_url: "https://example.com"
         self.assertEqual([row["title"] for row in payload["writing_tasks"]], ["写作任务一"])
         self.assertEqual(
             sorted(row["title"] for row in payload["drafts"]),
-            ["一篇口播母稿", "一篇草稿"],
+            ["一篇口播母稿", "一篇快速口播", "一篇草稿"],
         )
         self.assertEqual(payload["published"][0]["title"], "一篇成稿")
         self.assertEqual(payload["published"][0]["platform"], "公众号")
@@ -421,7 +426,10 @@ source_url: "https://example.com"
         self.assertEqual(payload["counts"]["topic_candidates"], 3)
         self.assertEqual(payload["counts"]["topic_continuations"], 1)
         self.assertEqual(payload["counts"]["writing_tasks"], 1)
-        self.assertEqual(payload["counts"]["drafts"], 2)
+        self.assertEqual(payload["counts"]["drafts"], 3)
+        # 已到期的复盘排在稿子和审核前面。
+        self.assertEqual(payload["focus"], "先复盘 1 篇已到期的发布内容")
+        self.assertEqual((payload["focus_count"], payload["focus_target"]), (1, "feedback"))
         self.assertEqual(payload["counts"]["published"], 1)
         self.assertEqual(payload["counts"]["feedback"], 2)
         self.assertEqual(payload["counts"]["feedback_pending"], 1)
@@ -493,6 +501,45 @@ source_url: "https://example.com"
                 "有 4 篇已发布内容的平台资料填写不正确",
             ],
         )
+
+    def test_focus_prefers_drafts_over_review_and_review_over_backlog(self) -> None:
+        self.assertEqual(dashboard.dashboard_payload()["focus_target"], "review")
+        oral_dir = self.vault / "10-创作/25-口播草稿"
+        oral_dir.mkdir(parents=True)
+        (oral_dir / "快速口播.md").write_text(
+            "---\nkind: koubo-draft\nstatus: draft\n---\n\n# 一篇快速口播\n",
+            encoding="utf-8",
+        )
+        payload = dashboard.dashboard_payload()
+        self.assertEqual(payload["focus"], "推进 1 篇手上的稿子")
+        self.assertEqual(payload["focus_target"], "drafts")
+
+    def test_feedback_overdue_respects_due_date(self) -> None:
+        self.assertTrue(dashboard.is_past_due("2026-01-01"))
+        self.assertTrue(dashboard.is_past_due("2026-01-01T08:00:00+00:00"))
+        self.assertFalse(dashboard.is_past_due("2999-01-01"))
+        self.assertFalse(dashboard.is_past_due(""))
+        self.assertFalse(dashboard.is_past_due("下周"))
+
+    def test_live_runtime_supersedes_stale_snapshot_errors(self) -> None:
+        # 快照记下的错误随后已在采集状态里标记解决，工作台不应继续报红。
+        snapshots = self.vault / ".state/health-snapshots"
+        snapshots.mkdir(parents=True)
+        (snapshots / "2026-07-23.json").write_text(
+            json.dumps(
+                {
+                    "date": "2026-07-23",
+                    "health": "red",
+                    "red_reasons": ["存在 19 个未解决错误", "X 书签已连续 3 轮读取失败"],
+                    "yellow_reasons": ["有 2 条到期反馈尚未复盘"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        payload = dashboard.dashboard_payload()
+        self.assertEqual(payload["health"], "yellow")
+        self.assertEqual(payload["health_reasons"], ["有 2 条到期反馈尚未复盘"])
 
     def test_layout_overrides_from_config_file(self) -> None:
         config = self.vault / "layout.json"
@@ -989,6 +1036,236 @@ source_url: "https://example.com"
                 dashboard.promote_candidate(
                     "10-创作/10-灵感/20-候选选题/候选.md", "一个角度"
                 )
+
+
+    # ---- 嵌入、查询、正文勾选、发布面板、网页复盘 ----
+
+    def write_note(self, rel: str, text: str) -> Path:
+        path = self.vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_embed_renders_base_view_and_heading_section(self) -> None:
+        self.write_note("50-系统/50-视图/候选.base", """filters:
+  and:
+    - file.inFolder("10-创作/候选")
+    - kind == "topic-candidate"
+properties:
+  file.name:
+    displayName: 选题
+views:
+  - type: table
+    name: 待选择
+    filters:
+      and:
+        - status == "candidate"
+        - attention_until > today()
+    order:
+      - file.name
+      - priority_score
+    sort:
+      - property: priority_score
+        direction: DESC
+""")
+        self.write_note("10-创作/候选/甲.md", "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 70\nattention_until: 2999-01-01\n---\n# 甲\n")
+        self.write_note("10-创作/候选/乙.md", "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 90\nattention_until: 2999-01-01\n---\n# 乙\n")
+        self.write_note("10-创作/候选/过期.md", "---\nkind: topic-candidate\nstatus: candidate\npriority_score: 99\nattention_until: 2000-01-01\n---\n# 过期\n")
+        self.write_note("10-创作/候选/关闭.md", "---\nkind: topic-candidate\nstatus: closed\n---\n# 关闭\n")
+        result = dashboard.embed_payload("50-系统/50-视图/候选.base#待选择")
+        self.assertEqual(result["type"], "base")
+        self.assertEqual([row["title"] for row in result["rows"]], ["乙", "甲"])
+        self.assertEqual(result["columns"][0]["label"], "选题")
+        self.assertEqual(result["unsupported"], "")
+
+        self.write_note("00-入口/周报.md", "# 周报\n\n## 本周总览\n\n总览内容\n\n### 细节\n\n细节内容\n\n## 下一节\n\n不该出现\n")
+        section = dashboard.embed_payload("00-入口/周报#本周总览")
+        self.assertEqual(section["heading"], "本周总览")
+        self.assertIn("细节内容", section["body"])
+        self.assertNotIn("不该出现", section["body"])
+
+    def test_query_block_supports_path_regex_or_and_negation(self) -> None:
+        self.write_note("10-创作/草稿/甲.md", "---\nkind: draft\nstatus: draft\n---\n# 甲\n")
+        self.write_note("10-创作/草稿/乙.md", "---\nkind: koubo-draft\nstatus: draft\n---\n# 乙\n")
+        self.write_note("10-创作/草稿/丙.md", "---\nkind: draft\nstatus: published\n---\n# 丙\n")
+        self.write_note("10-创作/别处/丁.md", "---\nkind: draft\nstatus: draft\n---\n# 丁\n")
+        result = dashboard.query_payload(
+            'path:"10-创作/草稿" (/^kind: draft$/ OR /^kind: koubo-draft$/) -/^status: published$/'
+        )
+        self.assertEqual(sorted(row["title"] for row in result["rows"]), ["乙", "甲"])
+        with self.assertRaisesRegex(ValueError, "还不支持"):
+            dashboard.query_payload("(path:x")
+
+    def test_toggle_task_checks_line_and_converts_plain_bullet(self) -> None:
+        rel = "10-创作/25-口播草稿/稿.md"
+        path = self.write_note(rel, "---\nkind: koubo-draft\nstatus: draft\n---\n# 稿\n\n## 待确认\n\n- [ ] 第一条\n- 第二条\n")
+        note = dashboard.note_payload(rel)
+        body_lines = note["body"].split("\n")
+        first, second = body_lines.index("- [ ] 第一条"), body_lines.index("- 第二条")
+        result = dashboard.toggle_task(rel, first, True, note["mtime_ns"])
+        result = dashboard.toggle_task(rel, second, True, result["mtime_ns"])
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("- [x] 第一条", text)
+        self.assertIn("- [x] 第二条", text)
+        self.assertTrue(text.startswith("---\nkind: koubo-draft"))
+        with self.assertRaisesRegex(ValueError, "刚被其他程序修改"):
+            dashboard.toggle_task(rel, first, False, note["mtime_ns"])
+        with self.assertRaisesRegex(ValueError, "不是勾选项"):
+            dashboard.toggle_task(rel, 0, True, result["mtime_ns"])
+
+    def test_publish_panel_collects_platforms_links_and_local_video(self) -> None:
+        video = self.vault / "out.mp4"
+        video.write_bytes(b"\x00" * 64)
+        self.write_note("40-发布/00-内容反馈/反馈.md", "---\nkind: content-feedback\nstatus: pending\n---\n# 反馈\n")
+        rel = "40-发布/50-口播视频/视频.md"
+        self.write_note(rel, f"""---
+kind: video-published
+status: published
+platform: 视频号；抖音
+video_file: "{video}"
+douyin_status: published
+douyin_url: "https://www.douyin.com/video/1"
+x_article_draft_url: "javascript:alert(1)"
+feedback_file: "[[40-发布/00-内容反馈/反馈]]"
+---
+# 视频
+""")
+        panel = dashboard.note_payload(rel)["publish"]
+        self.assertTrue(panel["video"])
+        rows = {row["label"]: row for row in panel["platforms"]}
+        self.assertEqual(set(rows), {"视频号", "抖音"})
+        self.assertEqual(rows["抖音"]["url"], "https://www.douyin.com/video/1")
+        self.assertEqual(panel["links"], [{"label": "反馈卡", "path": "40-发布/00-内容反馈/反馈.md"}])
+        self.assertEqual(dashboard.media_file(rel, "video_file"), video)
+        with self.assertRaisesRegex(ValueError, "不支持"):
+            dashboard.media_file(rel, "source_file")
+
+    def test_feedback_metrics_and_verdict_from_dashboard(self) -> None:
+        if dashboard.feedback_snapshot is None:
+            self.skipTest("反馈复盘脚本不在")
+        rel = "40-发布/00-内容反馈/2026-10-01-测试.md"
+        path = self.write_note(rel, """---
+kind: content-feedback
+status: pending
+platform: 抖音
+feedback_stage: 24h
+due_at: "2026-10-02T00:00:00-07:00"
+feedback_24h_status: pending
+feedback_7d_status: pending
+---
+
+# 口播视频反馈：测试
+
+## 24 小时事实快照
+
+### 抖音
+
+- 播放：
+- 点赞：
+- 抓取时间：
+
+## 24 小时初步信号
+
+- 评论区在追问什么：
+""")
+        note = dashboard.note_payload(rel)
+        fields = note["feedback"]["fields"]
+        self.assertEqual([(f["platform"], f["label"]) for f in fields], [("抖音", "播放"), ("抖音", "点赞")])
+        result = dashboard.save_feedback_metrics(
+            rel, {str(fields[0]["line"]): "1200", str(fields[1]["line"]): "30"}, note["mtime_ns"]
+        )
+        self.assertEqual(result["changed"], 2)
+        self.assertIn("- 播放：1200", path.read_text(encoding="utf-8"))
+        with self.assertRaisesRegex(ValueError, "结构刚变过"):
+            dashboard.save_feedback_metrics(rel, {"0": "x"}, result["mtime_ns"])
+        verdict = dashboard.record_feedback_verdict(rel, "换角度重写", "开头没留住人")
+        self.assertTrue(verdict["ok"])
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("status: complete", text)
+        self.assertIn("- 结论：换角度重写", text)
+        self.assertTrue((self.vault / dashboard.feedback_snapshot.WORKBENCH_REL).exists())
+        with self.assertRaisesRegex(ValueError, "不认识"):
+            dashboard.record_feedback_verdict(rel, "随便", "")
+
+    def test_performance_groups_by_series_and_issues_come_from_snapshot(self) -> None:
+        self.write_note("40-发布/10-X长文/文章.md", "---\nkind: article-published\nseries: 出海美卡\n---\n# 一篇文章\n")
+        self.write_note("40-发布/00-内容反馈/文章.md", """---
+kind: content-feedback
+status: complete
+article: "[[40-发布/10-X长文/文章]]"
+published_at: "2026-09-01T00:00:00+00:00"
+---
+# 反馈
+
+## 24 小时
+
+- 曝光：100
+- 收藏：1
+
+## 7 天
+
+- 曝光：2000
+- 收藏：40
+""")
+        rows = dashboard.load_performance(dashboard.markdown_files())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["title"], rows[0]["series"], rows[0]["views"], rows[0]["bookmarks"]), ("一篇文章", "出海美卡", 2000, 40))
+        self.assertEqual(rows[0]["bookmark_rate"], 2.0)
+        snapshots = self.vault / ".state/health-snapshots"
+        snapshots.mkdir(parents=True)
+        (snapshots / "2026-10-08.json").write_text(json.dumps({
+            "broken_links": [{"source": "40-发布/10-X长文/文章.md", "target": "不存在"}],
+            "underlinked_knowledge": [],
+        }, ensure_ascii=False), encoding="utf-8")
+        groups = dashboard.health_issue_groups()
+        self.assertEqual([g["label"] for g in groups], ["无法解析的链接"])
+        self.assertTrue(groups[0]["items"][0]["openable"])
+
+    def test_review_card_points_to_local_source(self) -> None:
+        self.write_note("30-资料/30-X书签/原帖.md", "# 原帖\n")
+        text = self.card.read_text(encoding="utf-8")
+        self.card.write_text(text.replace('source_url:', 'source_file: "30-资料/30-X书签/原帖.md"\nsource_url:'), encoding="utf-8")
+        card = dashboard.load_reviews()[0]
+        self.assertEqual(card["source_note"], "30-资料/30-X书签/原帖.md")
+
+
+class ObsidianViewsTests(unittest.TestCase):
+    views = dashboard.obsidian_views
+
+    def test_yaml_subset_handles_next_line_scalars_and_nested_lists(self) -> None:
+        spec = self.views.parse_yaml("""# 注释
+views:
+  - type: table
+    name: 待复盘
+    filters:
+      status == "pending"
+  - name: 可续写
+    filters:
+      and:
+        - fresh_until >= today()
+        - or:
+            - source_published_at != null
+            - and:
+                - refreshed_at != null
+    sort:
+      - property: priority_score
+        direction: DESC
+""")
+        first, second = spec["views"]
+        self.assertEqual(first["filters"], 'status == "pending"')
+        self.assertEqual(second["filters"]["and"][1]["or"][1], {"and": ["refreshed_at != null"]})
+        self.assertEqual(second["sort"], [{"property": "priority_score", "direction": "DESC"}])
+
+    def test_filters_compare_numbers_dates_and_null(self) -> None:
+        note = ("a/b.md", "b", {"score": "9", "until": "2026-10-15", "empty": ""})
+        evaluate = lambda expr: self.views.eval_filter(expr, note, "2026-10-08")
+        self.assertTrue(evaluate("score > 10") is False)
+        self.assertTrue(evaluate("until > today()"))
+        self.assertTrue(evaluate("empty == null"))
+        self.assertTrue(evaluate('file.inFolder("a")'))
+        self.assertTrue(evaluate({"not": ["score == 9"]}) is False)
+        with self.assertRaises(self.views.Unsupported):
+            evaluate("score.contains(1)")
 
 
 class TailnetAccessTests(unittest.TestCase):

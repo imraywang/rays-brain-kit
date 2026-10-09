@@ -45,9 +45,6 @@
         <button class="rail-action" id="capture-open" type="button">
           <span>＋</span>记下灵感
         </button>
-        <a class="rail-action subtle" id="open-inbox" href="#">
-          <span>↗</span>打开收件箱
-        </a>
       </div>
     </aside>
 
@@ -105,10 +102,10 @@
             <h2 id="focus-text">—</h2>
             <p class="hero-note" id="focus-note">系统正在找出阻力最大的环节。</p>
           </div>
-          <div class="hero-index" aria-hidden="true">
+          <button class="hero-index" id="hero-index" type="button" aria-label="跳到要处理的内容">
             <span id="hero-count">00</span>
-            <small>等待判断</small>
-          </div>
+            <small id="hero-label">等待判断</small>
+          </button>
         </section>
 
         <section class="pipeline-section" aria-labelledby="pipeline-title">
@@ -164,6 +161,18 @@
           <div class="board" id="board-columns"></div>
         </section>
 
+        <section class="performance-section" id="performance" aria-labelledby="performance-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Performance</p>
+              <h2 id="performance-title">📈 发布表现</h2>
+            </div>
+            <p>数据来自各篇反馈卡的最近一次快照；系列按正式稿的 series 属性归组，点一行打开反馈卡</p>
+          </div>
+          <div class="series-summary" id="series-summary"></div>
+          <div class="performance-list" id="performance-list"></div>
+        </section>
+
         <section class="knowledge-section" id="knowledge" aria-labelledby="knowledge-title">
           <div class="section-heading">
             <div>
@@ -196,6 +205,11 @@
             <div class="topic-map-candidates" id="topic-map-candidates"></div>
           </div>
 
+          <div class="issues-block" id="issues-block" hidden>
+            <div class="subheading"><h3>待修问题</h3><span id="issues-summary">来自最新健康日报</span></div>
+            <div class="issue-groups" id="issue-groups"></div>
+          </div>
+
           <div class="recent-block">
             <div class="subheading"><h3>最近动过的笔记</h3><span>继续上次的思路</span></div>
             <div class="recent-list" id="recent-list"></div>
@@ -218,6 +232,7 @@
       <label for="capture-text">灵感</label>
       <textarea id="capture-text" rows="8" maxlength="2000" placeholder="一句判断、一个问题，或直接贴一条链接…" required></textarea>
       <div class="capture-meta"><span id="capture-count">0 / 2000</span><span>文字进灵感收件箱；带链接自动投链接收件箱</span></div>
+      <a class="obsidian-link capture-inbox" id="capture-inbox" href="#">在 Obsidian 查看整个收件箱</a>
       <button class="primary-button" type="submit">记入收件箱</button>
     </form>
   </aside>
@@ -228,7 +243,7 @@
       <button class="note-nav" id="note-back" type="button" aria-label="返回上一篇" hidden>←</button>
       <span class="note-path" id="note-path"></span>
       <button class="note-nav" id="note-edit" type="button" aria-label="编辑正文" title="编辑正文（页首属性不受影响）">✎</button>
-      <a class="note-nav" id="note-obsidian" href="#" aria-label="在 Obsidian 打开" title="在 Obsidian 打开">↗</a>
+      <a class="note-nav obsidian-nav" id="note-obsidian" href="#" aria-label="在 Obsidian 打开" title="在 Obsidian 打开">◆</a>
       <button class="note-nav" id="note-close" type="button" aria-label="关闭阅读面板">×</button>
     </div>
     <div class="note-scroll" id="note-scroll">
@@ -236,6 +251,7 @@
       <h2 class="note-title" id="note-title"></h2>
       <div class="note-chips" id="note-chips"></div>
       <div class="note-actions" id="note-actions"></div>
+      <div class="note-panels" id="note-panels"></div>
       <article class="md" id="note-body"></article>
       <div class="note-editor" id="note-editor" hidden>
         <textarea id="note-editor-text" spellcheck="false" aria-label="正文编辑器"></textarea>

@@ -69,6 +69,7 @@ X_PUBLISH_ARCHIVE_RULES = {
     "draft": ("10-X长文", "article-published"),
     "article-draft": ("10-X长文", "article-published"),
     "oral-script": ("50-口播视频", "video-published"),
+    "koubo-draft": ("50-口播视频", "video-published"),
 }
 
 

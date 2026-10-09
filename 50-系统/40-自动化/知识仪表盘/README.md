@@ -25,7 +25,7 @@ RAYS_BRAIN=~/my-vault python3 server.py  # 指向该 vault 启动工作台
 - `10-创作/10-灵感/90-选题储备`：保留暂时不推进的选题，不进入当前候选列。
 - `10-创作/20-写作任务`：展示尚未完成的 `writing-task`、`content-task` 或现有 `content-pack`。
 - `10-创作/30-文章草稿`：展示图文母稿（`draft` / `article-draft`）。从长文改出来的口播稿也放这里，但跟着母稿走，不在母稿看板上单独占位。
-- `10-创作/25-口播草稿`：展示以口播起稿、没有图文母稿的 `oral-script`——这种稿子自己就是母稿，不收进来就一次都不会出现。
+- `10-创作/25-口播草稿`：展示以口播起稿、没有图文母稿的 `oral-script`（ray-kb 写的 `koubo-draft` 同义）——这种稿子自己就是母稿，不收进来就一次都不会出现。
 - `40-发布`：展示已发布内容，但不把下面的反馈笔记算成发布成品。
 - `40-发布/00-内容反馈`：读取发布后的反馈记录，并统计仍待复盘的数量。
 
@@ -72,6 +72,13 @@ python3 server.py
 - 键盘审核流：`J / K` 切换卡片，`1–5` 对应五种处理，`U` 撤回，`O` 在抽屉内读全文（再按关闭），`⇧O` 打开 Obsidian，`/` 或 `⌘K` 搜索。
 - 顶栏 🔔 可开启系统通知：页面不在前台时，新审核卡到达或采集异常会推送通知。
 
+- **少跳出去**：审核卡和阅读面板优先打开 `source_file` 指向的本地原文存档，原帖链接退为次要入口；站外链接一律标出域名并带 ↗，Obsidian 链接用 ◆ 标识。流程区和指标卡都能点，跳到审核区或看板对应列。
+- **Obsidian 嵌入在网页里还原**：阅读面板渲染 `![[笔记]]`、`![[笔记#标题]]`、`![[x.base#视图]]` 和 `query` 查询块（实现见 `obsidian_views.py`，只支持本库用到的子集，认不出的条件会提示以 Obsidian 为准）。
+- **发布面板**：成品、母稿的阅读面板按平台列出状态、正式链接（可复制）、草稿后台、封面，以及反馈卡等关联笔记；有 `video_file` 的直接播放本地视频。
+- **网页复盘**：反馈卡的阅读面板可以下结论（写回反馈卡并同步「反馈复盘」清单），也能逐项填平台数据。
+- **口播工作区**：口播稿的「待确认」逐条勾选（普通列表勾上会改写成任务行），录完点「标记已录制」。正文里的任务勾选框都可以直接点。
+- **发布表现**：按正式稿的 `series` 归组，比较各系列的平均浏览和收藏率；**待修问题**：把健康日报里能逐条修的问题列出来，点开即改。
+
 ## 新增 API（v3–v5）
 
 - `GET /api/note?path=` 或 `?link=`：读笔记全文与属性；`link` 按 Obsidian 双链规则解析（先路径后文件名）。
@@ -83,6 +90,10 @@ python3 server.py
 - `POST /api/pipeline/resolve-error`：`{at, message}`，在管线 state.json 中标记该错误已解决。
 - `POST /api/pipeline/run`：后台派生一轮采集，进行中拒绝重入；输出在状态目录 `logs/manual-run.log`。
 - `POST /api/intent`：`{path, action: "draft"}`，把写作任务排入 AI 任务队列（按任务去重）。
+- `GET /api/embed?link=`：嵌入内容（笔记、标题小节或 `.base` 视图）；`GET /api/query?q=`：执行 Obsidian 查询块。
+- `GET /api/media?path=&field=video_file`：按笔记属性送出本地视频（支持 Range），只认 `video_file` 字段和常见视频格式。
+- `POST /api/note/task`：`{path, line, checked, expected_mtime_ns}`，只改正文里那一行勾选。
+- `POST /api/feedback/metrics`：`{path, values: {行号: 值}, expected_mtime_ns}`；`POST /api/feedback/verdict`：`{path, verdict, reason}`。
 
 ## 安装成"应用"
 

@@ -11,9 +11,26 @@ const state = {
   angleTarget: null,
   publishTarget: null,
   pipelineErrors: [],
+  boardCollapsed: loadBoardCollapsed(),
 };
 
 const EXPECTED_SCHEMA_VERSION = 8;
+
+// 笔记 kind 的中文名；未收录的原样显示。
+const KIND_LABELS = {
+  concept: "概念", entity: "对象档案", question: "问题", viewpoint: "观点",
+  case: "案例", playbook: "方法", map: "地图", guide: "指南", "未标记": "未标记",
+  "topic-candidate": "候选选题", "capture-review": "审核卡", source: "来源",
+  "writing-task": "写作任务", "content-task": "写作任务", "content-pack": "成稿包",
+  draft: "图文母稿", "article-draft": "图文母稿", "ai-draft": "AI 初稿",
+  "oral-script": "口播稿", "koubo-draft": "口播稿",
+  "article-published": "已发文章", "video-published": "已发视频",
+  "content-feedback": "内容反馈", research: "调研", "research-note": "调研笔记",
+  transcript: "逐字稿", dashboard: "工作台", "topic-map-candidate-dashboard": "主题地图候选",
+  "knowledge-health-daily": "健康日报", "knowledge-health-weekly": "健康周报",
+  "map-digest-weekly": "地图周整理",
+};
+const kindLabel = (kind) => KIND_LABELS[kind] || kind || "";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -48,6 +65,21 @@ function actionClass(key) {
   }[key] || "";
 }
 
+// 看板上默认折叠的列：已发布只用来回看，不该挤掉待复盘。展开状态按浏览器记住。
+function loadBoardCollapsed() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("rb-board-collapsed") || "null");
+    if (Array.isArray(saved)) return new Set(saved);
+  } catch {}
+  return new Set(["published"]);
+}
+
+function saveBoardCollapsed() {
+  try {
+    localStorage.setItem("rb-board-collapsed", JSON.stringify([...state.boardCollapsed]));
+  } catch {}
+}
+
 const BOARD_COLUMNS = [
   { key: "pending", name: "待判断", dot: "red" },
   { key: "queued", name: "等待处理", dot: "yellow" },
@@ -75,6 +107,50 @@ function safeHttpUrl(value = "") {
   } catch {
     return "";
   }
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+// 站外链接统一写法：标出去哪个站、新标签页打开，悬停看完整地址。
+function externalLink(url, label = "", className = "ext-link") {
+  const safe = safeHttpUrl(url);
+  if (!safe) return "";
+  const host = hostOf(safe);
+  return `<a class="${className}" href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(safe)}" data-host="${escapeHtml(host)}">${escapeHtml(label || host)}</a>`;
+}
+
+// 页面内跳转：统计卡、首页「去处理」都走这里，目标是审核区、看板某列或某个区块。
+function jumpTo(target) {
+  if (!target) return;
+  if (target === "pipeline") {
+    openPipelineDrawer();
+    return;
+  }
+  if (target.startsWith("review")) {
+    const filter = target.split(":")[1];
+    if (filter) $(`.filter-tab[data-filter="${filter}"]`)?.click();
+    $("#review").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (target.startsWith("#")) {
+    $(target)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (state.boardCollapsed.has(target)) {
+    state.boardCollapsed.delete(target);
+    saveBoardCollapsed();
+    renderBoard();
+  }
+  const column = $(`#board-columns .board-col[data-column="${target}"]`);
+  if (!column) return;
+  $("#board").scrollIntoView({ behavior: "smooth", block: "start" });
+  column.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
 }
 
 function formatDay(value) {
@@ -157,11 +233,13 @@ function renderDashboard() {
   $("#health-dot").className = `health-dot ${data.health}`;
   $("#health-time").textContent = data.latest_health_at ? `健康记录 ${formatDay(data.latest_health_at)}` : "尚无健康记录";
   $("#focus-text").textContent = data.focus;
-  $("#focus-note").textContent = data.health_reasons[0]
-    ? `${data.health_reasons[0]}。这里的选择会进入原有自动处理流程。`
-    : "当前流程通畅，可以把注意力放在真正值得推进的材料上。";
-  $("#hero-count").textContent = String(counts.decision_pending).padStart(2, "0");
-  $("#open-inbox").href = data.inbox_uri;
+  const healthNote = data.health_reasons[0] ? `${data.health_reasons[0]}。` : "";
+  $("#focus-note").textContent = `${healthNote}${data.focus_hint || ""}`
+    || "当前流程通畅，可以把注意力放在真正值得推进的材料上。";
+  $("#hero-count").textContent = String(data.focus_count ?? counts.decision_pending).padStart(2, "0");
+  $("#hero-label").textContent = data.focus_label || "等待判断";
+  $("#hero-index").dataset.target = data.focus_target || "";
+  $("#capture-inbox").href = data.inbox_uri;
 
   renderPipeline(counts);
   renderRail();
@@ -171,6 +249,8 @@ function renderDashboard() {
   renderTrend();
   renderKnowledgeMix();
   renderTopicMapCandidates();
+  renderPerformance();
+  renderIssues();
   renderRecent();
 }
 
@@ -219,7 +299,7 @@ function renderRail() {
     return `
       <a class="rail-card" href="#" data-note-path="${escapeHtml(item.path)}">
         <strong>${escapeHtml(item.title)}</strong>
-        <small>${escapeHtml(item.kind || "")}${status ? ` · ${escapeHtml(status)}` : ""}</small>
+        <small>${escapeHtml(kindLabel(item.kind))}${status ? ` · ${escapeHtml(status)}` : ""}</small>
       </a>`;
   }).join("");
 
@@ -246,30 +326,30 @@ function renderRail() {
 
 function renderPipeline(counts) {
   const steps = [
-    ["资料池", counts.captured, "所有外部输入"],
-    ["待判断", counts.decision_pending, "今天的阻力"],
-    ["候选选题", counts.topic_candidates, "通过审核"],
-    ["可续写", counts.topic_continuations, "已有剩余角度"],
-    ["写作任务", counts.writing_tasks, "已经立项"],
-    ["草稿", counts.drafts, "正在写"],
-    ["已发布", counts.published, "内容成品"],
+    ["资料池", counts.captured, "所有外部输入", "pipeline"],
+    ["待判断", counts.decision_pending, "今天的阻力", "review"],
+    ["候选选题", counts.topic_candidates, "通过审核", "topics"],
+    ["可续写", counts.topic_continuations, "已有剩余角度", "continuations"],
+    ["写作任务", counts.writing_tasks, "已经立项", "tasks"],
+    ["草稿", counts.drafts, "正在写", "drafts"],
+    ["已发布", counts.published, "内容成品", "published"],
   ];
-  $("#pipeline").innerHTML = steps.map(([label, value, note], index) => `
-    <div class="pipeline-step ${index === 1 && value > 0 ? "attention" : ""}">
+  $("#pipeline").innerHTML = steps.map(([label, value, note, target], index) => `
+    <button class="pipeline-step ${index === 1 && value > 0 ? "attention" : ""}" type="button" data-jump="${target}">
       <span>${escapeHtml(label)}</span>
       <strong>${value}</strong>
       <small>${escapeHtml(note)}</small>
-    </div>
+    </button>
   `).join("");
 
   const ledger = [
-    ["高价值待判断", counts.high_value],
-    ["低成本可清理", counts.low_value],
-    ["长期知识", counts.knowledge],
-    ["待反馈", counts.feedback_pending],
+    ["高价值待判断", counts.high_value, "review:priority"],
+    ["低成本可清理", counts.low_value, "review:cleanup"],
+    ["长期知识", counts.knowledge, "#knowledge"],
+    ["待反馈", counts.feedback_pending, "feedback"],
   ];
-  $("#metric-ledger").innerHTML = ledger.map(([label, value]) => `
-    <div class="ledger-item"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>
+  $("#metric-ledger").innerHTML = ledger.map(([label, value, target]) => `
+    <button class="ledger-item" type="button" data-jump="${target}"><span>${escapeHtml(label)}</span><strong>${value}</strong></button>
   `).join("");
 }
 
@@ -318,8 +398,9 @@ function renderReview() {
     <p class="summary">${escapeHtml(item.summary || "这张卡还没有摘要，点标题阅读全文再判断。")}</p>
     <div class="review-links">
       <a class="text-link" href="#" data-note-path="${escapeHtml(item.path)}" data-note-follow="1">阅读全文 →</a>
-      <a class="text-link" href="${escapeHtml(item.obsidian_uri)}">在 Obsidian 打开 ↗</a>
-      ${source ? `<a class="text-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>` : ""}
+      ${item.source_note ? `<a class="text-link" href="#" data-note-path="${escapeHtml(item.source_note)}">读原文存档 →</a>` : ""}
+      ${source ? externalLink(source, `原帖 ${hostOf(source)}`, "text-link ext-link") : ""}
+      <a class="text-link obsidian-link" href="${escapeHtml(item.obsidian_uri)}" title="在 Obsidian 打开">Obsidian</a>
     </div>
     <div class="review-actions" aria-label="选择处理方式">
       ${reviewActionsFor(item).map((action) => `
@@ -480,15 +561,33 @@ function renderBoard() {
     feedback: (d.feedback || []).filter((item) => item.pending),
   };
   const LIMIT = 20;
+  const collapsed = (key) => key === "published" && state.boardCollapsed.has(key);
+  $("#board-columns").style.gridTemplateColumns = BOARD_COLUMNS
+    .map((col) => (collapsed(col.key) ? "44px" : "minmax(140px, 1fr)"))
+    .join(" ");
   $("#board-columns").innerHTML = BOARD_COLUMNS.map((col) => {
     const cards = columnData[col.key];
     const shown = cards.slice(0, LIMIT);
+    if (collapsed(col.key)) {
+      return `
+      <div class="board-col collapsed" data-column="${col.key}">
+        <button class="board-col-toggle" type="button" data-board-toggle="${col.key}" aria-expanded="false" aria-label="展开${col.name}（${cards.length}）">
+          <span class="col-dot ${col.dot}"></span>
+          <span class="board-col-count">${cards.length}</span>
+          <strong>${col.name}</strong>
+        </button>
+      </div>`;
+    }
+    const toggle = col.key === "published"
+      ? `<button class="board-col-fold" type="button" data-board-toggle="${col.key}" aria-expanded="true" aria-label="折叠${col.name}">‹</button>`
+      : "";
     return `
       <div class="board-col" data-column="${col.key}">
         <div class="board-col-head">
           <span class="col-dot ${col.dot}"></span>
           <strong>${col.name}</strong>
           <span class="board-col-count">${cards.length}</span>
+          ${toggle}
         </div>
         <div class="board-cards">
           ${shown.map((item) => boardCard(item, col.key)).join("") || `<p class="board-empty">暂无卡片</p>`}
@@ -509,6 +608,15 @@ function canDropTo(key) {
 }
 
 function bindBoardEvents() {
+  $$("#board-columns [data-board-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.boardToggle;
+      if (state.boardCollapsed.has(key)) state.boardCollapsed.delete(key);
+      else state.boardCollapsed.add(key);
+      saveBoardCollapsed();
+      renderBoard();
+    });
+  });
   $$("#board-columns .kcard[draggable='true']").forEach((card) => {
     card.addEventListener("dragstart", (event) => {
       state.dragging = { path: card.dataset.cardPath, column: card.dataset.cardColumn };
@@ -615,18 +723,14 @@ function renderTrend() {
 }
 
 function renderKnowledgeMix() {
-  const labelMap = {
-    concept: "概念", entity: "对象档案", question: "问题", viewpoint: "观点",
-    case: "案例", playbook: "方法", map: "地图", guide: "指南", "未标记": "未标记",
-  };
   const entries = Object.entries(state.data.knowledge_kinds || {}).sort((a, b) => b[1] - a[1]);
   const total = entries.reduce((sum, [, value]) => sum + value, 0);
   const max = Math.max(...entries.map(([, value]) => value), 1);
   $("#knowledge-total").textContent = `${total} 篇`;
   $("#knowledge-mix").innerHTML = entries.map(([kind, value]) => `
     <div class="mix-row">
-      <span>${escapeHtml(labelMap[kind] || kind)}</span>
-      <div class="mix-track"><progress max="${max}" value="${value}" aria-label="${escapeHtml(labelMap[kind] || kind)} ${value} 篇"></progress></div>
+      <span>${escapeHtml(kindLabel(kind))}</span>
+      <div class="mix-track"><progress max="${max}" value="${value}" aria-label="${escapeHtml(kindLabel(kind))} ${value} 篇"></progress></div>
       <strong>${value}</strong>
     </div>
   `).join("");
@@ -672,8 +776,8 @@ function renderTopicMapCandidates() {
         </div>
         <div class="topic-map-actions">
           <button type="button" class="primary-button" data-topic-map-action="approve" data-topic-map-id="${escapeHtml(candidate.id)}">${approveLabel}</button>
-          <button type="button" class="quiet-button" data-topic-map-action="watch" data-topic-map-id="${escapeHtml(candidate.id)}">观察 14 天</button>
-          <button type="button" class="quiet-button" data-topic-map-action="dismiss" data-topic-map-id="${escapeHtml(candidate.id)}">忽略</button>
+          <button type="button" class="ghost-button" data-topic-map-action="watch" data-topic-map-id="${escapeHtml(candidate.id)}">观察 14 天</button>
+          <button type="button" class="ghost-button" data-topic-map-action="dismiss" data-topic-map-id="${escapeHtml(candidate.id)}">忽略</button>
         </div>
       </article>`;
   }).join("");
@@ -722,10 +826,69 @@ async function chooseTopicMapCandidate(candidateId, action, button) {
   }
 }
 
+function renderPerformance() {
+  const rows = state.data.performance || [];
+  $("#performance").hidden = !rows.length;
+  if (!rows.length) return;
+  const series = new Map();
+  rows.forEach((row) => {
+    const bucket = series.get(row.series) || { name: row.series, count: 0, views: 0, bookmarks: 0 };
+    bucket.count += 1;
+    bucket.views += Number(row.views) || 0;
+    bucket.bookmarks += Number(row.bookmarks) || 0;
+    series.set(row.series, bucket);
+  });
+  const buckets = [...series.values()].sort((a, b) => b.views / b.count - a.views / a.count);
+  const maxAvg = Math.max(...buckets.map((b) => b.views / b.count), 1);
+  $("#series-summary").innerHTML = buckets.map((b) => {
+    const avg = Math.round(b.views / b.count);
+    const rate = b.views ? (b.bookmarks / b.views * 100).toFixed(2) : "0.00";
+    return `
+      <div class="series-card">
+        <span>${escapeHtml(b.name)}</span>
+        <strong>${avg.toLocaleString("zh-CN")}</strong>
+        <small>平均浏览 · ${b.count} 篇 · 收藏率 ${rate}%</small>
+        <div class="series-bar"><i data-bar="${Math.max(3, avg / maxAvg * 100).toFixed(1)}"></i></div>
+      </div>`;
+  }).join("");
+  const maxViews = Math.max(...rows.map((row) => Number(row.views) || 0), 1);
+  $("#performance-list").innerHTML = `
+    <div class="perf-row perf-head"><span>内容</span><span>系列</span><span>浏览</span><span>收藏</span><span>收藏率</span></div>
+    ${rows.map((row) => `
+      <a class="perf-row" href="#" data-note-path="${escapeHtml(row.path)}">
+        <span class="perf-title"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.date)}</small></span>
+        <span class="perf-series">${escapeHtml(row.series)}</span>
+        <span class="perf-views"><b>${Number(row.views).toLocaleString("zh-CN")}</b><i data-bar="${Math.max(2, (Number(row.views) || 0) / maxViews * 100).toFixed(1)}"></i></span>
+        <span>${Number(row.bookmarks).toLocaleString("zh-CN")}</span>
+        <span>${Number(row.bookmark_rate).toFixed(2)}%</span>
+      </a>`).join("")}`;
+  // 页面 CSP 不允许 style 属性，条形宽度只能经 CSSOM 设置
+  $$("#performance [data-bar]").forEach((bar) => { bar.style.width = `${bar.dataset.bar}%`; });
+}
+
+function renderIssues() {
+  const groups = state.data.health_issues || [];
+  $("#issues-block").hidden = !groups.length;
+  if (!groups.length) return;
+  const total = groups.reduce((sum, group) => sum + group.count, 0);
+  $("#issues-summary").textContent = `${total} 项 · 来自最新健康日报，修完下次日报自动消失`;
+  $("#issue-groups").innerHTML = groups.map((group) => `
+    <details class="issue-group"${group.count <= 5 ? " open" : ""}>
+      <summary><strong>${escapeHtml(group.label)}</strong><span>${group.count}</span></summary>
+      <ul>${group.items.map((item) => `
+        <li>${item.openable
+          ? `<a href="#" data-note-path="${escapeHtml(item.path)}">${escapeHtml(item.title)}</a>`
+          : `<span title="${escapeHtml(item.path)}">${escapeHtml(item.title)}</span>`}
+          <small>${escapeHtml(item.detail)}</small></li>`).join("")}
+        ${group.count > group.items.length ? `<li class="issue-more">还有 ${group.count - group.items.length} 项，见健康日报</li>` : ""}
+      </ul>
+    </details>`).join("");
+}
+
 function renderRecent() {
   $("#recent-list").innerHTML = (state.data.recent || []).map((item) => `
     <a class="recent-item" href="#" data-note-path="${escapeHtml(item.path)}">
-      <small>${escapeHtml(item.area)}${item.kind ? ` · ${escapeHtml(item.kind)}` : ""}</small>
+      <small>${escapeHtml(item.area)}${item.kind ? ` · ${escapeHtml(kindLabel(item.kind))}` : ""}</small>
       <strong>${escapeHtml(item.title)}</strong>
       <time datetime="${escapeHtml(item.modified)}">${escapeHtml(formatRecent(item.modified))}</time>
     </a>
@@ -759,21 +922,26 @@ function mdInline(text) {
   out = out.replace(/\[\[([^\]]+)\]\]/g, (m, inner) => {
     const [targetRaw, alias] = splitOnce(inner, "|");
     const target = targetRaw.trim();
-    return `<a href="#" class="wikilink" data-wikilink="${target}">${alias.trim() || target}</a>`;
+    // 和 Obsidian 一样：没写别名时只显示文件名，不显示整条路径
+    const shown = alias.trim() || target.split("#")[0].split("/").pop() || target;
+    return `<a href="#" class="wikilink" data-wikilink="${target}" title="${target}">${shown}</a>`;
   });
   out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, (m, alt, url) => {
     if (/^https?:\/\//i.test(url)) {
-      return `<a href="${url}" target="_blank" rel="noopener noreferrer">🖼 ${alt || "外部图片"}</a>`;
+      return `<a class="ext-link" href="${url}" target="_blank" rel="noopener noreferrer" title="${url}" data-host="${escapeHtml(hostOf(url))}">🖼 ${alt || "外部图片"}</a>`;
     }
     const name = url.split("/").pop();
     return `<img class="md-img" loading="lazy" src="/api/asset?link=${encodeURIComponent(decodeURIComponent(name))}" alt="${alt}">`;
   });
-  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, (m, label, url) =>
-    /^(https?:|obsidian:)/i.test(url)
-      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
-      : label);
-  out = out.replace(/(^|[^"'=\]>])(https?:\/\/[^\s<>&]+[^\s<>&.,;:!?)])/g,
-    '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, (m, label, url) => {
+    if (/^obsidian:/i.test(url)) return `<a class="obsidian-link" href="${url}">${label}</a>`;
+    if (/^https?:/i.test(url)) {
+      return `<a class="ext-link" href="${url}" target="_blank" rel="noopener noreferrer" title="${url}" data-host="${escapeHtml(hostOf(url))}">${label}</a>`;
+    }
+    return label;
+  });
+  out = out.replace(/(^|[^"'=\]>])(https?:\/\/[^\s<>&]+[^\s<>&.,;:!?)])/g, (m, lead, url) =>
+    `${lead}<a class="ext-link bare" href="${url}" target="_blank" rel="noopener noreferrer" title="${url}" data-host="${escapeHtml(hostOf(url))}">${escapeHtml(hostOf(url) || url)}${url.length > hostOf(url).length + 12 ? "/…" : ""}</a>`);
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   out = out.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
   out = out.replace(/~~([^~]+)~~/g, "<del>$1</del>");
@@ -782,10 +950,11 @@ function mdInline(text) {
   return out;
 }
 
-function renderMarkdown(source, { skipTitle = "" } = {}) {
+// tasks: true 时勾选框可点，data-line 是正文里的行号（注释按原行数保留，行号才对得上）。
+function renderMarkdown(source, { skipTitle = "", tasks = false } = {}) {
   const lines = String(source || "")
-    .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/\r\n?/g, "\n")
+    .replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, ""))
     .split("\n");
   const html = [];
   let sawContent = false;
@@ -793,6 +962,7 @@ function renderMarkdown(source, { skipTitle = "" } = {}) {
   while (i < lines.length) {
     const line = lines[i];
     if (/^\s*```/.test(line)) {
+      const lang = line.trim().slice(3).trim().toLowerCase();
       const buffer = [];
       i += 1;
       while (i < lines.length && !/^\s*```/.test(lines[i])) {
@@ -800,7 +970,17 @@ function renderMarkdown(source, { skipTitle = "" } = {}) {
         i += 1;
       }
       i += 1;
-      html.push(`<pre><code>${escapeHtml(buffer.join("\n"))}</code></pre>`);
+      html.push(lang === "query"
+        ? `<div class="md-embed md-query" data-query="${escapeHtml(buffer.join(" ").trim())}"><p class="md-embed-loading">正在查询…</p></div>`
+        : `<pre><code>${escapeHtml(buffer.join("\n"))}</code></pre>`);
+      sawContent = true;
+      continue;
+    }
+    const blockEmbed = line.trim().match(/^!\[\[([^\]]+)\]\]$/);
+    if (blockEmbed && !IMAGE_EXT.test(splitOnce(blockEmbed[1], "|")[0].split("#")[0].trim())) {
+      const target = splitOnce(blockEmbed[1], "|")[0].trim();
+      html.push(`<div class="md-embed" data-embed="${escapeHtml(target)}"><p class="md-embed-loading">正在载入 ${escapeHtml(target)}…</p></div>`);
+      i += 1;
       sawContent = true;
       continue;
     }
@@ -836,7 +1016,7 @@ function renderMarkdown(source, { skipTitle = "" } = {}) {
         const depth = Math.min(3, Math.floor(item[1].replace(/\t/g, "  ").length / 2));
         const task = item[3].match(/^\[([ xX])\]\s*(.*)$/);
         const body = task
-          ? `<input type="checkbox" disabled${task[1] === " " ? "" : " checked"}> ${mdInline(task[2])}`
+          ? `<input type="checkbox" ${tasks ? `data-task-line="${i}"` : "disabled"}${task[1] === " " ? "" : " checked"}> ${mdInline(task[2])}`
           : mdInline(item[3]);
         items.push(`<li class="md-indent-${depth}${task ? " md-task" : ""}">${body}</li>`);
         i += 1;
@@ -873,6 +1053,260 @@ function renderMarkdown(source, { skipTitle = "" } = {}) {
     sawContent = true;
   }
   return html.join("");
+}
+
+/* ---- Obsidian 嵌入：笔记片段、.base 视图、query 查询块 ---- */
+
+const EMBED_MAX_DEPTH = 2;
+
+function embedCell(value) {
+  if (!value) return "";
+  return mdInline(String(value).replace(/^"|"$/g, ""));
+}
+
+function renderEmbedResult(result) {
+  if (result.type === "base") {
+    const columns = result.columns || [];
+    const head = columns.map((col) => `<th>${escapeHtml(col.label)}</th>`).join("");
+    const rows = (result.rows || []).map((row) => `<tr>${columns.map((col, index) => {
+      const value = row.cells?.[col.key] || "";
+      return index === 0
+        ? `<td><a href="#" data-note-path="${escapeHtml(row.path)}">${escapeHtml(row.title)}</a></td>`
+        : `<td>${embedCell(value)}</td>`;
+    }).join("")}</tr>`).join("");
+    const empty = `<p class="md-embed-empty">这个视图现在是空的。</p>`;
+    const more = result.total > (result.rows || []).length ? `<p class="md-embed-more">共 ${result.total} 条，只显示前 ${(result.rows || []).length} 条</p>` : "";
+    const warn = result.unsupported ? `<p class="md-embed-warn">有条件工作台还不认识（${escapeHtml(result.unsupported)}），结果可能不全，以 Obsidian 为准。</p>` : "";
+    return `
+      <div class="md-embed-head"><span>视图</span><strong>${escapeHtml(result.title)}${result.view ? ` · ${escapeHtml(result.view)}` : ""}</strong><em>${result.total} 条</em></div>
+      ${warn}${rows ? `<div class="md-table"><table><tr>${head}</tr>${rows}</table></div>` : empty}${more}`;
+  }
+  if (result.type === "query") {
+    const rows = (result.rows || []).map((row) => `
+      <li><a href="#" data-note-path="${escapeHtml(row.path)}">${escapeHtml(row.title)}</a>
+      <small>${escapeHtml([kindLabel(row.kind), statusLabelOf(row.kind, row.status) || row.status].filter(Boolean).join(" · "))}</small></li>`).join("");
+    return `
+      <div class="md-embed-head"><span>查询</span><strong>${result.total} 条结果</strong></div>
+      ${rows ? `<ul class="md-embed-list">${rows}</ul>` : `<p class="md-embed-empty">没有符合条件的笔记。</p>`}`;
+  }
+  return `
+    <div class="md-embed-head"><span>嵌入</span><a href="#" data-note-path="${escapeHtml(result.path)}">${escapeHtml(result.title)}${result.heading ? ` › ${escapeHtml(result.heading)}` : ""}</a></div>
+    <div class="md-embed-body">${renderMarkdown(result.body, { skipTitle: result.title })}</div>`;
+}
+
+async function hydrateEmbeds(root, depth = 0) {
+  const slots = [...root.querySelectorAll(".md-embed[data-embed]:not([data-done]), .md-embed[data-query]:not([data-done])")]
+    .filter((slot) => slot.closest(".md-embed-body") === null || depth > 0);
+  await Promise.all(slots.map(async (slot) => {
+    slot.dataset.done = "1";
+    if (depth >= EMBED_MAX_DEPTH) {
+      slot.innerHTML = `<a href="#" data-wikilink="${escapeHtml(slot.dataset.embed || "")}">📄 ${escapeHtml(slot.dataset.embed || "查询")}</a>`;
+      return;
+    }
+    try {
+      const result = slot.dataset.query !== undefined
+        ? await api(`/api/query?q=${encodeURIComponent(slot.dataset.query)}`)
+        : await api(`/api/embed?link=${encodeURIComponent(slot.dataset.embed)}`);
+      slot.innerHTML = renderEmbedResult(result);
+      slot.classList.add(`md-embed-${result.type}`);
+      await hydrateEmbeds(slot, depth + 1);
+    } catch (error) {
+      slot.innerHTML = `<p class="md-embed-warn">${escapeHtml(error.message)}</p>`;
+    }
+  }));
+}
+
+/* ---- 阅读面板里的工作区：发布面板、网页复盘、口播待确认 ---- */
+
+const PUBLISH_STATUS_LABELS = { published: "已发布", draft: "草稿", saved: "草稿", scheduled: "已排期", pending: "待发" };
+
+function renderPublishPanel(note) {
+  const panel = note.publish;
+  if (!panel) return "";
+  const rows = (panel.platforms || []).map((row) => {
+    const status = PUBLISH_STATUS_LABELS[row.status] || row.status || "未记录";
+    const links = [
+      row.url ? externalLink(row.url, `正式链接 ${hostOf(row.url)}`) : "",
+      row.url ? `<button class="copy-link" type="button" data-copy="${escapeHtml(row.url)}">复制</button>` : "",
+      row.draft_url ? externalLink(row.draft_url, "草稿后台") : "",
+    ].filter(Boolean).join("");
+    return `
+      <div class="publish-row">
+        <strong>${escapeHtml(row.label)}</strong>
+        <span class="publish-status ${row.status === "published" ? "done" : ""}">${escapeHtml(status)}</span>
+        <span class="publish-links">${links || `<em>还没有链接</em>`}</span>
+        <small>${escapeHtml(row.published_at ? formatDay(row.published_at) : "")}</small>
+      </div>`;
+  }).join("");
+  const covers = (panel.covers || []).map((cover) => `
+    <figure><img src="/api/asset?path=${encodeURIComponent(cover.path)}" alt="${escapeHtml(cover.label)}" loading="lazy"><figcaption>${escapeHtml(cover.label)}</figcaption></figure>`).join("");
+  const links = (panel.links || []).map((link) => `<a class="kprop link" href="#" data-note-path="${escapeHtml(link.path)}">${escapeHtml(link.label)} →</a>`).join("");
+  const video = panel.video
+    ? `<video class="publish-video" controls preload="metadata" src="/api/media?path=${encodeURIComponent(note.path)}&field=video_file"></video>`
+    : "";
+  return `
+    <section class="note-panel publish-panel" aria-label="发布面板">
+      <h3>发布面板</h3>
+      ${video}
+      ${rows ? `<div class="publish-rows">${rows}</div>` : ""}
+      ${covers ? `<div class="publish-covers">${covers}</div>` : ""}
+      ${links ? `<div class="publish-related">${links}</div>` : ""}
+    </section>`;
+}
+
+function renderFeedbackPanel(note) {
+  const panel = note.feedback;
+  if (!panel) return "";
+  if (panel.done) {
+    return `<section class="note-panel feedback-panel"><h3>复盘</h3><p class="panel-note">已复盘${panel.verdict ? `：<strong>${escapeHtml(panel.verdict)}</strong>` : ""}。</p></section>`;
+  }
+  const groups = new Map();
+  (panel.fields || []).forEach((field) => {
+    const key = `${field.section}${field.platform ? ` · ${field.platform}` : ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(field);
+  });
+  const form = [...groups.entries()].map(([title, fields]) => `
+    <fieldset>
+      <legend>${escapeHtml(title)}</legend>
+      ${fields.map((field) => `
+        <label><span>${escapeHtml(field.label)}</span>
+        <input type="text" data-metric-line="${field.line}" value="${escapeHtml(field.value)}" autocomplete="off"></label>`).join("")}
+    </fieldset>`).join("");
+  const verdicts = (panel.verdicts || []).map((label) => `
+    <button class="decision-button${label === panel.suggested ? " primary" : ""}" type="button" data-verdict="${escapeHtml(label)}">${escapeHtml(label)}${label === panel.suggested ? "（建议）" : ""}</button>`).join("");
+  return `
+    <section class="note-panel feedback-panel" aria-label="网页复盘">
+      <h3>复盘</h3>
+      ${panel.signal ? `<p class="panel-note">信号：${escapeHtml(panel.signal)}</p>` : ""}
+      ${verdicts ? `
+        <label class="verdict-reason"><span>理由</span><input type="text" id="verdict-reason" maxlength="300" value="${escapeHtml(panel.signal || "")}"></label>
+        <div class="verdict-actions">${verdicts}</div>` : ""}
+      ${form ? `
+        <details class="metric-form"${panel.signal?.startsWith("暂无") ? " open" : ""}>
+          <summary>填平台数据</summary>
+          ${form}
+          <button class="primary-button slim" type="button" id="metric-save">保存数据</button>
+        </details>` : ""}
+    </section>`;
+}
+
+const ORAL_KINDS = ["oral-script", "koubo-draft"];
+
+function renderOralPanel(note) {
+  if (!ORAL_KINDS.includes(note.kind)) return "";
+  const items = pendingConfirmations(note.body);
+  const open = items.filter((item) => !item.done).length;
+  const list = items.map((item) => `
+    <label class="confirm-item${item.done ? " done" : ""}">
+      <input type="checkbox" data-task-line="${item.line}"${item.done ? " checked" : ""}>
+      <span>${mdInline(item.text)}</span>
+    </label>`).join("");
+  return `
+    <section class="note-panel oral-panel" aria-label="口播工作区">
+      <h3>口播工作区 · 待确认 ${items.length ? `${open} / ${items.length}` : ""}</h3>
+      ${list ? `<div class="confirm-list">${list}</div>` : `<p class="panel-note">这篇没有「待确认」清单。</p>`}
+      <p class="panel-note">${note.status === "recorded"
+        ? "已录制，发布后点「登记发布」。"
+        : open ? "逐条处理完再开录，录完点「标记已录制」。" : "待确认都处理完了，可以开录；录完点「标记已录制」。"}</p>
+    </section>`;
+}
+
+// 「待确认」小节下的列表项：任务行和普通列表都算，普通列表勾上后会改写成任务行。
+function pendingConfirmations(body) {
+  const items = [];
+  let inSection = false;
+  String(body || "").split("\n").forEach((line, index) => {
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (heading) {
+      inSection = /待确认/.test(heading[1]);
+      return;
+    }
+    if (!inSection) return;
+    const bullet = line.match(/^[-*+]\s+(?:\[([ xX])\]\s*)?(\S.*)$/);
+    if (bullet) items.push({ line: index, text: bullet[2], done: Boolean(bullet[1] && bullet[1] !== " ") });
+  });
+  return items;
+}
+
+function bindNotePanels(note) {
+  $$("#note-panels [data-copy]").forEach((button) => button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(button.dataset.copy);
+      showToast("链接已复制");
+    } catch {
+      showToast("复制失败，请手动选中链接");
+    }
+  }));
+  $$("#note-panels [data-verdict]").forEach((button) => button.addEventListener("click", async () => {
+    const verdict = button.dataset.verdict;
+    if (!(await workbenchConfirm(`把这篇的复盘结论定为「${verdict}」？会写回反馈卡并同步「反馈复盘」清单。`, verdict))) return;
+    try {
+      const result = await api("/api/feedback/verdict", {
+        method: "POST",
+        body: JSON.stringify({ path: note.path, verdict, reason: $("#verdict-reason")?.value || "" }),
+      });
+      showToast(result.message);
+      await loadDashboard({ quiet: true });
+      await openNote({ path: note.path }, { push: false });
+    } catch (error) {
+      showToast(error.message);
+    }
+  }));
+  const save = $("#metric-save");
+  if (save) {
+    save.addEventListener("click", async () => {
+      const values = {};
+      $$("#note-panels [data-metric-line]").forEach((input) => { values[input.dataset.metricLine] = input.value; });
+      save.disabled = true;
+      try {
+        const result = await api("/api/feedback/metrics", {
+          method: "POST",
+          body: JSON.stringify({ path: note.path, values, expected_mtime_ns: note.mtime_ns }),
+        });
+        showToast(result.changed ? `已保存 ${result.changed} 项数据` : "数据没有变化");
+        await openNote({ path: note.path }, { push: false });
+      } catch (error) {
+        showToast(error.message);
+        save.disabled = false;
+      }
+    });
+  }
+}
+
+// 正文勾选框（待确认、回写检查等）：只改那一行，失败就把勾还原。
+async function toggleNoteTask(box) {
+  const note = state.note.current;
+  if (!note) return;
+  const index = Number(box.dataset.taskLine);
+  box.disabled = true;
+  try {
+    const result = await api("/api/note/task", {
+      method: "POST",
+      body: JSON.stringify({ path: note.path, line: index, checked: box.checked, expected_mtime_ns: note.mtime_ns }),
+    });
+    note.mtime_ns = result.mtime_ns;
+    const lines = note.body.split("\n");
+    lines[index] = /\[[ xX]\]/.test(lines[index])
+      ? lines[index].replace(/\[([ xX])\]/, box.checked ? "[x]" : "[ ]")
+      : lines[index].replace(/^(\s*[-*+]\s+)/, "$1[x] ");
+    note.body = lines.join("\n");
+    if (ORAL_KINDS.includes(note.kind)) {
+      $("#note-panels").innerHTML = notePanelsHtml(note);
+      bindNotePanels(note);
+      $("#note-body").innerHTML = renderMarkdown(note.body, { skipTitle: note.title, tasks: true });
+      hydrateEmbeds($("#note-body"));
+    }
+  } catch (error) {
+    box.checked = !box.checked;
+    showToast(error.message);
+  } finally {
+    box.disabled = false;
+  }
+}
+
+function notePanelsHtml(note) {
+  return renderOralPanel(note) + renderPublishPanel(note) + renderFeedbackPanel(note);
 }
 
 /* ---- 阅读抽屉 ---- */
@@ -1032,7 +1466,7 @@ function renderNoteDrawer(note) {
   const meta = note.frontmatter || {};
   $("#note-path").textContent = note.path.length > 58 ? `…${note.path.slice(-58)}` : note.path;
   $("#note-obsidian").href = note.obsidian_uri;
-  $("#note-kicker").textContent = [note.kind, statusLabelOf(note.kind, note.status) || note.status]
+  $("#note-kicker").textContent = [kindLabel(note.kind), statusLabelOf(note.kind, note.status) || note.status]
     .filter(Boolean).join(" · ") || "笔记";
   $("#note-title").textContent = note.title;
   const chips = [];
@@ -1045,12 +1479,18 @@ function renderNoteDrawer(note) {
   }));
   if (meta.selected_angle) chips.push(`<span class="kprop">角度：${escapeHtml(meta.selected_angle)}</span>`);
   if (meta.fresh_until) chips.push(`<span class="kprop timeliness">新鲜至 ${escapeHtml(meta.fresh_until)}</span>`);
+  if (note.source_note && note.source_note !== note.path) {
+    chips.push(`<a class="kprop link" href="#" data-note-path="${escapeHtml(note.source_note)}">原文存档 →</a>`);
+  }
   const source = safeHttpUrl(meta.source_url || "");
-  if (source) chips.push(`<a class="kprop link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">来源 ↗</a>`);
+  if (source) chips.push(externalLink(source, "", "kprop link ext-link"));
   $("#note-chips").innerHTML = chips.join("");
   $("#note-actions").innerHTML = noteContextActions(note);
-  $("#note-body").innerHTML = renderMarkdown(note.body, { skipTitle: note.title });
+  $("#note-panels").innerHTML = notePanelsHtml(note);
+  $("#note-body").innerHTML = renderMarkdown(note.body, { skipTitle: note.title, tasks: true });
   bindNoteActions(note);
+  bindNotePanels(note);
+  hydrateEmbeds($("#note-body"));
   $("#note-back").hidden = state.note.stack.length < 2;
   $("#note-scroll").scrollTop = 0;
 }
@@ -1616,6 +2056,7 @@ async function runSearch() {
 
 function bindEvents() {
   $("#refresh").addEventListener("click", () => loadDashboard());
+  $("#hero-index").addEventListener("click", () => jumpTo($("#hero-index").dataset.target));
   $("#notify-toggle").addEventListener("click", toggleNotifications);
   $("#capture-open").addEventListener("click", openCapture);
   $("#capture-close").addEventListener("click", closeCapture);
@@ -1725,6 +2166,12 @@ function bindEvents() {
 
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element)) return;
+    const jump = event.target.closest("[data-jump]");
+    if (jump) {
+      event.preventDefault();
+      jumpTo(jump.dataset.jump);
+      return;
+    }
     const pipelineLink = event.target.closest("[data-open-pipeline]");
     if (pipelineLink) {
       event.preventDefault();
@@ -1744,6 +2191,11 @@ function bindEvents() {
     }
   });
 
+  ["#note-body", "#note-panels"].forEach((selector) => $(selector).addEventListener("change", (event) => {
+    if (event.target instanceof HTMLInputElement && event.target.dataset.taskLine !== undefined) {
+      toggleNoteTask(event.target);
+    }
+  }));
   $("#note-close").addEventListener("click", closeNoteDrawer);
   $("#note-scrim").addEventListener("click", () => {
     if (noteDrawerOpenState()) closeNoteDrawer();

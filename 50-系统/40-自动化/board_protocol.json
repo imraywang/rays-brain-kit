@@ -59,6 +59,16 @@
         { "from": "pending", "to": "not-needed", "label": "本轮无需复盘", "confirm": "确认这条内容本轮没有可用数据或无需继续复盘？", "set": { "feedback_completed_at": "$datetime" } },
         { "from": "not-needed", "to": "pending", "label": "恢复为待复盘", "set": { "feedback_completed_at": "" } }
       ]
+    },
+    {
+      "kinds": ["oral-script", "koubo-draft"],
+      "dirs": ["oral_scripts_dir"],
+      "status_labels": { "draft": "待录制", "recorded": "已录制" },
+      "set_on_change": { "updated_at": "$datetime" },
+      "transitions": [
+        { "from": "draft", "to": "recorded", "label": "标记已录制", "set": { "recorded_at": "$datetime" } },
+        { "from": "recorded", "to": "draft", "label": "退回待录制" }
+      ]
     }
   ]
 }
