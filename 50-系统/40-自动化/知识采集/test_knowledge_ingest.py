@@ -21,12 +21,15 @@ class XBookmarkCaptureTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.old_x_dir = ingest.X_DIR
         self.old_x_cleanup_dir = ingest.X_CLEANUP_DIR
+        self.old_discarded_x_ids_file = ingest.DISCARDED_X_IDS_FILE
         ingest.X_DIR = Path(self.temp.name)
         ingest.X_CLEANUP_DIR = Path(self.temp.name) / "cleanup"
+        ingest.DISCARDED_X_IDS_FILE = Path(self.temp.name) / "discarded_x_ids.txt"
 
     def tearDown(self) -> None:
         ingest.X_DIR = self.old_x_dir
         ingest.X_CLEANUP_DIR = self.old_x_cleanup_dir
+        ingest.DISCARDED_X_IDS_FILE = self.old_discarded_x_ids_file
         self.temp.cleanup()
 
     @staticmethod
@@ -179,6 +182,26 @@ tweet_id: "2040000000000000001"
         self.assertIn("Full article body", text)
         self.assertIn("With a second paragraph.", text)
 
+    def test_trailing_spaces_in_tweet_text_do_not_force_refresh(self) -> None:
+        tweet = {
+            "id": "2040000000000000002",
+            "text": "第一行 \n\n@someone \n第三行",
+            "created_at": "2026-07-17T01:02:03.000Z",
+        }
+        path = ingest.write_x_bookmark(tweet, "tester", None)
+        text = path.read_text(encoding="utf-8")
+
+        self.assertFalse(ingest.x_bookmark_needs_refresh(text, tweet, None, None))
+        tweet["text"] = "正文真的改了"
+        self.assertTrue(ingest.x_bookmark_needs_refresh(text, tweet, None, None))
+
+    def test_discarded_ledger_ids_participate_in_deduplication(self) -> None:
+        ingest.DISCARDED_X_IDS_FILE.write_text(
+            "# 注释行忽略\n2040000000000000009\n\n", encoding="utf-8"
+        )
+
+        self.assertEqual(ingest.archived_x_ids(), {"2040000000000000009"})
+
     def test_archived_bookmark_ids_still_participate_in_deduplication(self) -> None:
         archived = (
             ingest.X_CLEANUP_DIR
@@ -207,12 +230,15 @@ class XArticleImageTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.old_x_dir = ingest.X_DIR
         self.old_x_cleanup_dir = ingest.X_CLEANUP_DIR
+        self.old_discarded_x_ids_file = ingest.DISCARDED_X_IDS_FILE
         ingest.X_DIR = Path(self.temp.name)
         ingest.X_CLEANUP_DIR = Path(self.temp.name) / "cleanup"
+        ingest.DISCARDED_X_IDS_FILE = Path(self.temp.name) / "discarded_x_ids.txt"
 
     def tearDown(self) -> None:
         ingest.X_DIR = self.old_x_dir
         ingest.X_CLEANUP_DIR = self.old_x_cleanup_dir
+        ingest.DISCARDED_X_IDS_FILE = self.old_discarded_x_ids_file
         self.temp.cleanup()
 
     @staticmethod
@@ -2394,9 +2420,10 @@ class CarriedProcessingStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.saved = {name: getattr(ingest, name) for name in ("X_DIR", "X_CLEANUP_DIR")}
+        self.saved = {name: getattr(ingest, name) for name in ("X_DIR", "X_CLEANUP_DIR", "DISCARDED_X_IDS_FILE")}
         ingest.X_DIR = self.root / "30-资料/30-X书签"
         ingest.X_CLEANUP_DIR = self.root / "90-归档/90-待清理"
+        ingest.DISCARDED_X_IDS_FILE = self.root / "discarded_x_ids.txt"
         ingest.X_DIR.mkdir(parents=True)
 
     def tearDown(self) -> None:

@@ -39,6 +39,7 @@ PROMPT_FILE = SYSTEM_DIR / "review-prompt.md"
 CONTENT_PACK_TEMPLATE = SYSTEM_DIR.parents[1] / "30-模板/内容成稿包.md"
 X_DIR = VAULT / "30-资料/30-X书签"
 X_CLEANUP_DIR = VAULT / "90-归档/90-待清理"
+DISCARDED_X_IDS_FILE = SYSTEM_DIR / "discarded_x_ids.txt"
 WEB_DIR = VAULT / "30-资料/40-网页剪藏"
 WEREAD_DIR = VAULT / "30-资料/50-读书划线"
 LINK_INBOX = VAULT / "30-资料/00-待抓取/链接收件箱.md"
@@ -55,7 +56,6 @@ TOPIC_MAP_CANDIDATE_NOTE = VAULT / "00-入口/10-工作台/主题地图候选.md
 MAP_DIGEST_STATE = STATE_HOME / "map-digest.json"
 MAP_DIGEST_NOTE = VAULT / "00-入口/10-工作台/知识地图整理.md"
 MAP_DIGEST_WEEKLY_DIR = VAULT / "00-入口/20-日报/知识地图整理"
-LEGACY_ACTIONS_SCRIPT = SYSTEM_DIR / "legacy_actions.py"
 TOPIC_FRESHNESS_DAYS = {"强时效": 3, "中时效": 14, "常青": 30}
 ARTICLE_DRAFT_DIR = VAULT / "10-创作/30-文章草稿"
 ORAL_DRAFT_DIR = VAULT / "10-创作/25-口播草稿"
@@ -236,8 +236,13 @@ def existing_x_ids() -> set[str]:
 
 
 def archived_x_ids() -> set[str]:
-    """已经进入可恢复清理区的书签仍参与去重，避免后续同步重新导入。"""
+    """已经进入可恢复清理区或已永久清理的书签仍参与去重，避免后续同步重新导入。"""
     ids: set[str] = set()
+    if DISCARDED_X_IDS_FILE.exists():
+        for line in DISCARDED_X_IDS_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                ids.add(line)
     if not X_CLEANUP_DIR.exists():
         return ids
     for path in X_CLEANUP_DIR.rglob("*.md"):
@@ -537,6 +542,11 @@ def legacy_x_notes_from_git(path: Path) -> str:
     return preserved_x_notes(proc.stdout) if proc.returncode == 0 else ""
 
 
+def strip_line_ends(text: str) -> str:
+    """写入时会去掉行尾空白，比对正文前两边做同样处理，避免同一条书签每轮都被判为需要刷新。"""
+    return "\n".join(line.rstrip() for line in text.splitlines())
+
+
 def x_bookmark_needs_refresh(
     existing_text: str,
     tweet: dict[str, Any],
@@ -551,7 +561,8 @@ def x_bookmark_needs_refresh(
     if meta.get("capture_status") != "complete":
         return True
     full_text = x_full_text(tweet)
-    if full_text and full_text not in existing_text:
+    comparable_text = strip_line_ends(existing_text)
+    if full_text and strip_line_ends(full_text) not in comparable_text:
         return True
     media_count = len(x_media_items(tweet, media_by_key))
     if meta.get("attachment_count") != str(media_count):
@@ -562,7 +573,7 @@ def x_bookmark_needs_refresh(
     if article_body and (
         meta.get("article_fetch_status") != "success"
         or meta.get("article_chars") != str(len(article_body))
-        or article_body not in existing_text
+        or strip_line_ends(article_body) not in comparable_text
     ):
         return True
     if (article or {}).get("media_resolved"):
@@ -5205,23 +5216,6 @@ def maintain_review_attention(
     return result
 
 
-def process_legacy_actions() -> dict[str, Any]:
-    if not LEGACY_ACTIONS_SCRIPT.exists():
-        return {"processed": 0, "waiting": 0, "status": "not-installed"}
-    proc = subprocess.run(
-        [sys.executable, str(LEGACY_ACTIONS_SCRIPT), "apply"],
-        text=True,
-        capture_output=True,
-        timeout=120,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr[-3000:] or proc.stdout[-3000:] or "legacy actions failed")
-    data = json.loads(proc.stdout)
-    if data.get("processed"):
-        log(f"legacy review actions processed: {data['processed']}")
-    return data
-
-
 def source_id(path: Path, text: str) -> str:
     meta = parse_frontmatter(text)
     if is_weread_card(path, text):
@@ -5954,6 +5948,24 @@ def status(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+STDOUT_LOG_ROTATE_BYTES = 2 * 1024 * 1024
+
+
+def rotate_stdout_log() -> None:
+    """launchd 把输出追加进同一个文件；超过上限就改名为 .1（只留一份旧日志），下次启动自动写新文件。"""
+    try:
+        fd = sys.stdout.fileno()
+        info = os.fstat(fd)
+        if not (info.st_mode & 0o170000 == 0o100000) or info.st_size < STDOUT_LOG_ROTATE_BYTES:
+            return
+        raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", 50), bytes(1024))
+        path = Path(raw.split(b"\0", 1)[0].decode())
+        if path.is_file():
+            path.replace(path.with_name(path.name + ".1"))
+    except (OSError, ValueError, AttributeError):
+        return
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ray's Brain unified capture and review pipeline")
     parser.add_argument(
@@ -6050,19 +6062,16 @@ def main() -> None:
     elif args.command == "review":
         result = {
             "actions": process_review_actions(state),
-            "legacy_actions": process_legacy_actions(),
             "reviewed": review_pending(state, config),
         }
         save_state(state)
     elif args.command == "actions":
         result = {
             "actions": process_review_actions(state),
-            "legacy_actions": process_legacy_actions(),
         }
         save_state(state)
     elif args.command == "run":
         actions_before = process_review_actions(state)
-        legacy_actions_before = process_legacy_actions()
         result = sync_only(state, config)
         try:
             result["x_articles"] = detect_x_article_publications(config)
@@ -6091,15 +6100,13 @@ def main() -> None:
             key: actions_before.get(key, 0) + actions_after.get(key, 0)
             for key in actions_before
         }
-        legacy_actions_after = process_legacy_actions()
-        result["legacy_actions"] = {
-            "processed": legacy_actions_before.get("processed", 0) + legacy_actions_after.get("processed", 0),
-            "waiting": legacy_actions_after.get("waiting", 0),
-        }
         result["topic_attention"] = maintain_topic_attention()
         result["review_attention"] = maintain_review_attention(state)
         result["knowledge_reconcile"] = reconcile_knowledge_links()
         save_state(state)
+    if args.command == "run":
+        rotate_stdout_log()
+        print(f"=== {now_local()} run ===")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if run_lock is not None:
         run_lock.close()
