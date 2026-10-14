@@ -27,6 +27,7 @@ SNAPSHOT_NAME = re.compile(r"^snapshot-\d{8}-\d{6}$")
 EXCLUDES = (
     ".git/",
     ".obsidian/",
+    "/.claude/worktrees/",
     ".DS_Store",
     "**/__pycache__/",
     "50-系统/40-自动化/对标拆解/media/",
@@ -52,7 +53,10 @@ def ignored(relative: Path) -> bool:
     parts = relative.parts
     if not parts:
         return False
-    if parts[0] in {".git", ".obsidian"} or "__pycache__" in parts:
+    # 与 rsync 的排除规则保持一致：".git/"、".obsidian/" 在任意层级都排除；临时工作树整体不备份
+    if ".git" in parts[:-1] or ".obsidian" in parts[:-1] or "__pycache__" in parts:
+        return True
+    if relative.as_posix().startswith(".claude/worktrees/"):
         return True
     if relative.name == ".DS_Store":
         return True

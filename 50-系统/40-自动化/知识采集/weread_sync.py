@@ -23,7 +23,7 @@ from pathlib import Path
 
 import requests
 
-SKILL_VERSION = "1.0.4"
+SKILL_VERSION = "1.0.5"
 GATEWAY = "https://i.weread.qq.com/api/agent/gateway"
 
 SCRIPT_DIR = Path(__file__).resolve().parent

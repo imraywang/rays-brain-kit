@@ -51,6 +51,26 @@ class ExternalBackupTests(unittest.TestCase):
         self.assertTrue((snapshot / "history.bundle").is_file())
         self.assertEqual((self.destination / "latest").resolve(), snapshot.resolve())
 
+    def test_nested_obsidian_and_claude_worktrees_do_not_break_verification(self) -> None:
+        nested = self.source / ".claude/worktrees/old-session/.obsidian"
+        nested.mkdir(parents=True)
+        (nested / "app.json").write_text("{}", encoding="utf-8")
+        (self.source / ".claude/worktrees/old-session/笔记.md").write_text("副本\n", encoding="utf-8")
+        other = self.source / "30-资料/某项目/.obsidian"
+        other.mkdir(parents=True)
+        (other / "workspace.json").write_text("{}", encoding="utf-8")
+
+        result = backup.run_backup(
+            self.source,
+            self.destination,
+            keep=2,
+            require_separate_device=False,
+        )
+        snapshot = Path(str(result["snapshot"]))
+        self.assertTrue(result["verified"])
+        self.assertFalse((snapshot / "vault/.claude/worktrees").exists())
+        self.assertFalse((snapshot / "vault/30-资料/某项目/.obsidian").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
