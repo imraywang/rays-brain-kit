@@ -24,6 +24,8 @@ DEFAULT_VAULT = Path(__file__).resolve().parents[3]
 FEEDBACK_DIR_REL = "40-发布/00-内容反馈"
 WORKBENCH_REL = "00-入口/10-工作台/反馈复盘.md"
 INGEST_CONFIG_REL = "50-系统/40-自动化/知识采集/config.json"
+FEEDBACK_CONFIG_REL = "50-系统/40-自动化/反馈复盘/config.json"
+VIDEO_ARTICLE_DIR_REL = "40-发布/50-口播视频"
 
 STALE_DAYS = 30
 DONE_STATUSES = {
@@ -343,7 +345,38 @@ def normalize_card(path: Path, vault: Path, now: datetime) -> bool:
     return True
 
 
-def close_pending_without_data(path: Path, vault: Path, now: datetime) -> bool:
+def video_feedback_paused(vault: Path) -> bool:
+    """反馈复盘/config.json 的 video_feedback_paused 为真时，口播视频不再跟进反馈。"""
+    try:
+        config = json.loads((vault / FEEDBACK_CONFIG_REL).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(config.get("video_feedback_paused"))
+
+
+def is_video_card(meta: dict[str, str]) -> bool:
+    return meta.get("form", "").strip().startswith("口播") or VIDEO_ARTICLE_DIR_REL in meta.get("article", "")
+
+
+PAUSED_CLOSE_REASON = "口播视频反馈已暂停（视频平台数据拿不到）；保留发布事实，不据此判断内容效果"
+PAUSED_CONCLUSION = (
+    "- 结论：视频反馈已暂停，不判断选题效果\n"
+    "- 理由：视频号、抖音、小红书的数据目前拿不到，反馈卡暂停跟进；保留发布事实\n"
+)
+
+
+def close_pending_without_data(
+    path: Path,
+    vault: Path,
+    now: datetime,
+    *,
+    reason: str = "本轮未提供可复核的平台数据；保留发布事实，不据此判断内容效果",
+    verdict: str = "data-unavailable",
+    conclusion: str = (
+        "- 结论：本轮数据不可得，不判断选题效果\n"
+        "- 理由：没有提供可复核的平台数据；保留发布事实，下一次有数据时再比较\n"
+    ),
+) -> bool:
     """用户确认不补平台数据时，关闭当前待办，但不伪造效果判断。"""
     text = path.read_text(encoding="utf-8")
     meta = parse_frontmatter(text)
@@ -363,8 +396,8 @@ def close_pending_without_data(path: Path, vault: Path, now: datetime) -> bool:
             if meta.get("feedback_7d_status", "") not in {"", "pending"}
             else "unavailable"
         ),
-        "close_reason": "本轮未提供可复核的平台数据；保留发布事实，不据此判断内容效果",
-        "verdict": "data-unavailable",
+        "close_reason": reason,
+        "verdict": verdict,
         "updated_at": iso(now),
     }
     for key in UNFETCHABLE_STATUS_KEYS:
@@ -373,9 +406,8 @@ def close_pending_without_data(path: Path, vault: Path, now: datetime) -> bool:
     if "## 复盘结论" not in text:
         text = text.rstrip("\n") + (
             "\n\n## 复盘结论\n\n"
-            "- 结论：本轮数据不可得，不判断选题效果\n"
-            "- 理由：没有提供可复核的平台数据；保留发布事实，下一次有数据时再比较\n"
-            f"- 复盘时间：{iso(now)}\n"
+            + conclusion
+            + f"- 复盘时间：{iso(now)}\n"
         )
     path.write_text(set_frontmatter_keys(text, updates), encoding="utf-8")
     sync_article_feedback(vault, {**meta, **updates})
@@ -749,6 +781,17 @@ def run(
         )
         if closed_without_data:
             notes.append(f"按用户确认关闭 {closed_without_data} 条无可复核平台数据的反馈")
+    if video_feedback_paused(vault):
+        paused_closed = 0
+        for path in feedback_files(vault):
+            meta = parse_frontmatter(path.read_text(encoding="utf-8"))
+            if is_video_card(meta) and close_pending_without_data(
+                path, vault, now,
+                reason=PAUSED_CLOSE_REASON, verdict="paused", conclusion=PAUSED_CONCLUSION,
+            ):
+                paused_closed += 1
+        if paused_closed:
+            notes.append(f"口播视频反馈已暂停，关闭 {paused_closed} 条待跟进的视频反馈")
     snapshots = 0
     errors: list[str] = []
     for path in feedback_files(vault):

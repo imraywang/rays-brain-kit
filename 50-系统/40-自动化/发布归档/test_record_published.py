@@ -348,6 +348,20 @@ class RecordPublishedTests(unittest.TestCase):
         self.assertEqual(article_meta["platform"], "抖音；视频号")
         self.assertEqual(card_meta["platform"], "抖音；视频号")
 
+    def test_paused_video_feedback_records_publish_without_card(self) -> None:
+        config = self.root / self.rp.FEEDBACK_CONFIG
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('{"video_feedback_paused": true}', encoding="utf-8")
+
+        report = self.run_video()
+
+        self.assertEqual(self.meta(VIDEO)["douyin_status"], "published")
+        self.assertFalse((self.root / VIDEO_CARD).exists())
+        self.assertTrue(any("口播视频反馈已暂停" in line for line in report))
+        # 图文不受影响
+        self.run_record()
+        self.assertIn("feedback_file", self.meta(ARTICLE))
+
     def test_video_card_uses_the_video_template(self) -> None:
         """图文那张卡没有完播率，套错模板等于三个平台的主指标一个都不记。"""
         self.run_video()

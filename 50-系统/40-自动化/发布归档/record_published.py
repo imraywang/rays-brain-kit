@@ -25,6 +25,7 @@ FEEDBACK_DIR = "40-发布/00-内容反馈"
 X_BOOKMARK_DIR = "30-资料/30-X书签"
 ARTICLE_FEEDBACK_TEMPLATE = "50-系统/30-模板/内容反馈.md"
 VIDEO_FEEDBACK_TEMPLATE = "50-系统/30-模板/口播视频反馈.md"
+FEEDBACK_CONFIG = "50-系统/40-自动化/反馈复盘/config.json"
 
 ACTIVE_WRITING_TASK_DIR = "10-创作/20-写作任务"
 ACTIVE_ARTICLE_DRAFT_DIR = "10-创作/30-文章草稿"
@@ -665,6 +666,15 @@ def is_video(article: Path) -> bool:
     return rel(article).startswith(VIDEO_DIR)
 
 
+def video_feedback_paused() -> bool:
+    """反馈复盘/config.json 的 video_feedback_paused 为真时，口播视频登记发布不再建反馈卡。"""
+    try:
+        config = json.loads((VAULT / FEEDBACK_CONFIG).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(config.get("video_feedback_paused"))
+
+
 def render_feedback_template(article: Path, title: str, date_value: str) -> str:
     """反馈卡只从 vault 模板读取，避免脚本与模板各维护一份。"""
     relative = VIDEO_FEEDBACK_TEMPLATE if is_video(article) else ARTICLE_FEEDBACK_TEMPLATE
@@ -797,10 +807,13 @@ def record(
     new_article_text, article_updates = update_article(
         article, platform, url, published_at, confirmed_at
     )
-    card, card_text, card_updates, card_created = ensure_feedback_card(
-        article, article_meta, platform, url, published_at, now
-    )
-    if not article_meta.get("feedback_file", "").strip():
+    card: Path | None = None
+    card_text, card_updates, card_created = "", {}, False
+    if not (is_video(article) and video_feedback_paused()):
+        card, card_text, card_updates, card_created = ensure_feedback_card(
+            article, article_meta, platform, url, published_at, now
+        )
+    if card is not None and not article_meta.get("feedback_file", "").strip():
         article_updates["feedback_file"] = wikilink(card)
         new_article_text = update_frontmatter(
             new_article_text, {"feedback_file": wikilink(card)}
@@ -823,7 +836,10 @@ def record(
     report.append(f"正式稿 {rel(article)}")
     for key, value in article_updates.items():
         report.append(f"  {key}: {value}")
-    report.append(("新建反馈卡 " if card_created else "反馈卡 ") + rel(card))
+    if card is None:
+        report.append("反馈卡 未建立——口播视频反馈已暂停（反馈复盘/config.json）")
+    else:
+        report.append(("新建反馈卡 " if card_created else "反馈卡 ") + rel(card))
     for key, value in card_updates.items():
         report.append(f"  {key}: {value}")
     if bookmark is None:
@@ -856,7 +872,7 @@ def record(
         return report
 
     article.write_text(new_article_text, encoding="utf-8")
-    if card_updates or card_created:
+    if card is not None and (card_updates or card_created):
         card.parent.mkdir(parents=True, exist_ok=True)
         card.write_text(card_text, encoding="utf-8")
     if bookmark is not None and bookmark_updates:

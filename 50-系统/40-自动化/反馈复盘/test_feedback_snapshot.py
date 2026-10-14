@@ -232,6 +232,30 @@ class FeedbackSnapshotTests(unittest.TestCase):
         self.assertEqual(article_meta["shipinhao_data_status"], "unavailable")
         self.assertEqual(article_meta["douyin_data_status"], "unavailable")
 
+    def test_video_feedback_paused_closes_only_video_cards(self) -> None:
+        config = self.vault / fb.FEEDBACK_CONFIG_REL
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('{"video_feedback_paused": true}', encoding="utf-8")
+        video_card = self.feedback_dir / "2026-07-20-口播测试.md"
+        video_card.write_text(
+            "---\nkind: content-feedback\nstatus: pending\nform: 口播短视频\n"
+            "article: \"[[40-发布/50-口播视频/口播测试]]\"\nfeedback_24h_status: pending\n"
+            "feedback_7d_status: pending\nshipinhao_data_status: pending\n---\n\n# 口播测试\n",
+            encoding="utf-8",
+        )
+        article_before = fb.parse_frontmatter(self.card.read_text(encoding="utf-8"))
+
+        fb.run(self.vault, now=self.now, fetch=self.fetch)
+
+        video_meta = fb.parse_frontmatter(video_card.read_text(encoding="utf-8"))
+        self.assertEqual(video_meta["status"], "complete")
+        self.assertEqual(video_meta["verdict"], "paused")
+        self.assertEqual(video_meta["shipinhao_data_status"], "unavailable")
+        self.assertIn("视频反馈已暂停", video_card.read_text(encoding="utf-8"))
+        article_after = fb.parse_frontmatter(self.card.read_text(encoding="utf-8"))
+        self.assertNotEqual(article_after.get("verdict"), "paused")
+        self.assertEqual(article_after.get("status"), article_before.get("status"))
+
     def test_pure_video_platform_card_downgraded_and_ready(self) -> None:
         video = self.feedback_dir / "2026-07-24-纯视频.md"
         video.write_text(
