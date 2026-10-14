@@ -428,6 +428,7 @@ button.hero-index:focus-visible { outline: 2px solid var(--accent); outline-offs
 .col-dot.blue { background: var(--blue); }
 .col-dot.purple { background: var(--purple); }
 .col-dot.green { background: var(--green); }
+.col-dot.gray { background: var(--muted, #9a9a9a); }
 .board-col-head strong { font-size: 12.5px; font-weight: 650; }
 .board-col-count { margin-left: auto; padding: 1px 7px; border-radius: 999px; color: var(--muted); background: rgba(55, 53, 47, .08); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .board-col-fold { flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 14px; line-height: 1; cursor: pointer; }

@@ -69,9 +69,16 @@ function actionClass(key) {
 function loadBoardCollapsed() {
   try {
     const saved = JSON.parse(localStorage.getItem("rb-board-collapsed") || "null");
-    if (Array.isArray(saved)) return new Set(saved);
+    if (Array.isArray(saved)) {
+      // 「选题参考」列是后加的：老用户第一次看到时也默认折叠，之后以用户自己的选择为准。
+      if (!localStorage.getItem("rb-board-reference-seen")) {
+        localStorage.setItem("rb-board-reference-seen", "1");
+        if (!saved.includes("reference")) saved.push("reference");
+      }
+      return new Set(saved);
+    }
   } catch {}
-  return new Set(["published"]);
+  return new Set(["published", "reference"]);
 }
 
 function saveBoardCollapsed() {
@@ -85,6 +92,7 @@ const BOARD_COLUMNS = [
   { key: "queued", name: "等待处理", dot: "yellow" },
   { key: "topics", name: "候选选题", dot: "blue" },
   { key: "continuations", name: "可续写", dot: "blue" },
+  { key: "reference", name: "选题参考", dot: "gray" },
   { key: "tasks", name: "写作任务", dot: "purple" },
   { key: "drafts", name: "草稿", dot: "purple" },
   { key: "published", name: "已发布", dot: "green" },
@@ -542,6 +550,9 @@ function boardCard(item, column) {
   if (column === "pending" || column === "queued") {
     props.push(`<span class="kprop score">${Number(item.score) || 0}</span>`);
   }
+  if (column === "reference" && Number(item.writing_value_score)) {
+    props.push(`<span class="kprop score">写作 ${Number(item.writing_value_score)}</span>`);
+  }
   if ((column === "topics" || column === "continuations" || column === "tasks") && Number(item.priority_score)) {
     props.push(`<span class="kprop score">优先 ${Number(item.priority_score)}</span>`);
   }
@@ -580,13 +591,15 @@ function renderBoard() {
     queued: d.queued_reviews || [],
     topics: d.topic_candidates || [],
     continuations: d.topic_continuations || [],
+    reference: d.topic_reference || [],
     tasks: d.writing_tasks || [],
     drafts: d.drafts || [],
     published: d.published || [],
     feedback: (d.feedback || []).filter((item) => item.pending),
   };
   const LIMIT = 20;
-  const collapsed = (key) => key === "published" && state.boardCollapsed.has(key);
+  const FOLDABLE = ["published", "reference"];
+  const collapsed = (key) => FOLDABLE.includes(key) && state.boardCollapsed.has(key);
   $("#board-columns").style.gridTemplateColumns = BOARD_COLUMNS
     .map((col) => (collapsed(col.key) ? "44px" : "minmax(140px, 1fr)"))
     .join(" ");
@@ -603,7 +616,7 @@ function renderBoard() {
         </button>
       </div>`;
     }
-    const toggle = col.key === "published"
+    const toggle = FOLDABLE.includes(col.key)
       ? `<button class="board-col-fold" type="button" data-board-toggle="${col.key}" aria-expanded="true" aria-label="折叠${col.name}">‹</button>`
       : "";
     return `

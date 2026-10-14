@@ -786,6 +786,31 @@ def load_topic_continuations(files: list[Path], limit: int = 40) -> list[dict[st
     )
 
 
+REFERENCE_TOPIC_STATUSES = {"closed", "parked"}
+
+
+def load_topic_reference(files: list[Path], limit: int = 200) -> list[dict[str, object]]:
+    """选题参考：已关闭或暂缓的候选与选题储备。想不到角度时翻看，不是待办。"""
+    rows: list[dict[str, object]] = []
+    for prefix in (area_prefix("topics_dir"), area_prefix("topic_reserve_dir")):
+        rows.extend(
+            notes_under(
+                files,
+                prefix,
+                limit,
+                predicate=lambda item, meta: (
+                    meta.get("kind") == "topic-candidate"
+                    and meta.get("status", "").strip().strip('"') in REFERENCE_TOPIC_STATUSES
+                ),
+            )
+        )
+    rows.sort(
+        key=lambda item: (int(item["writing_value_score"]), int(item["priority_score"])),
+        reverse=True,
+    )
+    return rows[:limit]
+
+
 INACTIVE_TASK_STATUSES = {
     "published",
     "completed",
@@ -986,6 +1011,7 @@ def dashboard_payload() -> dict[str, object]:
     queued = [card for card in pending if card["selected_action"]]
     topic_candidates = load_topic_candidates(files, len(files))
     topic_continuations = load_topic_continuations(files, len(files))
+    topic_reference = load_topic_reference(files, len(files))
     writing_tasks = load_writing_tasks(files, len(files))
     feedback = load_feedback(files, len(files))
     feedback_pending = [item for item in feedback if item["pending"]]
@@ -1123,12 +1149,13 @@ def dashboard_payload() -> dict[str, object]:
          "等待判断", "这里的选择会进入原有自动处理流程。", "review"),
         (writing_tasks, f"从 {len(writing_tasks)} 个写作任务里推进一篇",
          "写作任务", "", "tasks"),
-        (topic_candidates, f"从 {len(topic_candidates)} 个候选选题里挑一个立项",
-         "候选选题", "", "topics"),
         (topic_continuations, f"从 {len(topic_continuations)} 个可续写角度里挑一个推进",
          "可续写角度", "", "continuations"),
         (feedback_pending, f"复盘 {len(feedback_pending)} 篇已发布内容",
          "待复盘", "", "feedback"),
+        # 候选是可选参考池，不是待办；只有别的都清空时才提示翻一翻。
+        (topic_candidates, f"想不到写什么时，翻翻 {len(topic_candidates)} 个候选选题",
+         "候选选题", "候选只作参考，想法清楚就直接立项写作任务。", "topics"),
     )
     focus, focus_label, focus_hint, focus_target, focus_count = (
         "当前没有紧急积压，适合整理旧知识", "当前积压", "", "", 0
@@ -1178,6 +1205,7 @@ def dashboard_payload() -> dict[str, object]:
             "queued": len(queued),
             "topic_candidates": len(topic_candidates),
             "topic_continuations": len(topic_continuations),
+            "topic_reference": len(topic_reference),
             "writing_tasks": len(writing_tasks),
             "knowledge": len(knowledge_files),
             "drafts": len(drafts),
@@ -1195,6 +1223,7 @@ def dashboard_payload() -> dict[str, object]:
         "queued_reviews": queued,
         "topic_candidates": topic_candidates,
         "topic_continuations": topic_continuations,
+        "topic_reference": topic_reference,
         "writing_tasks": writing_tasks,
         "drafts": drafts,
         "published": published,

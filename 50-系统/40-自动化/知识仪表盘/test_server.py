@@ -272,6 +272,30 @@ source_url: "https://example.com"
         )
         log_operation.assert_called_once()
 
+    def test_topic_reference_lists_closed_and_parked_by_writing_value(self) -> None:
+        topics_dir = self.vault / dashboard.LAYOUT["topics_dir"]
+        reserve_dir = self.vault / dashboard.LAYOUT["topic_reserve_dir"]
+        topics_dir.mkdir(parents=True)
+        reserve_dir.mkdir(parents=True)
+        (topics_dir / "已关闭.md").write_text(
+            "---\nkind: topic-candidate\nstatus: closed\nwriting_value_score: 70\n---\n\n# 已关闭\n",
+            encoding="utf-8",
+        )
+        (reserve_dir / "储备.md").write_text(
+            '---\nkind: topic-candidate\nstatus: "parked"\nwriting_value_score: 90\n---\n\n# 储备\n',
+            encoding="utf-8",
+        )
+        (topics_dir / "已立项.md").write_text(
+            "---\nkind: topic-candidate\nstatus: active\nwriting_value_score: 99\n---\n\n# 已立项\n",
+            encoding="utf-8",
+        )
+
+        payload = dashboard.dashboard_payload()
+
+        titles = [item["title"] for item in payload["topic_reference"]]
+        self.assertEqual(titles, ["储备", "已关闭"])
+        self.assertEqual(payload["counts"]["topic_reference"], 2)
+
     def test_dashboard_reads_real_creation_stages_and_feedback(self) -> None:
         topics_dir = self.vault / dashboard.LAYOUT["topics_dir"]
         topics_dir.mkdir(parents=True)
