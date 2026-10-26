@@ -12,6 +12,10 @@ const state = {
   publishTarget: null,
   pipelineErrors: [],
   boardCollapsed: loadBoardCollapsed(),
+  radar: null,
+  radarTab: "new",
+  radarLimit: 40,
+  radarTimer: null,
 };
 
 const EXPECTED_SCHEMA_VERSION = 8;
@@ -2092,6 +2096,186 @@ async function runSearch() {
   }
 }
 
+// ---- 爆款雷达：数据在状态目录，只有「加入选题」才写进 vault ----
+
+const RADAR_TABS = [
+  { key: "new", name: "全部新题", match: (row) => row.status === "new" },
+  { key: "douyin", name: "抖音", match: (row) => row.status === "new" && row.platform === "douyin" },
+  { key: "xiaohongshu", name: "小红书", match: (row) => row.status === "new" && row.platform === "xiaohongshu" },
+  { key: "listicle", name: "清单类", match: (row) => row.status === "new" && row.listicle },
+  { key: "adopted", name: "已加入", match: (row) => row.status === "adopted" },
+  { key: "rejected", name: "不合适", match: (row) => row.status === "rejected" || row.status === "seen" },
+];
+const PLATFORM_NAMES = { douyin: "抖音", xiaohongshu: "小红书" };
+
+async function loadRadar() {
+  try {
+    state.radar = await api("/api/radar");
+  } catch (error) {
+    state.radar = { installed: true, error: error.message, items: [] };
+  }
+  renderRadar();
+  clearTimeout(state.radarTimer);
+  if (state.radar.running) state.radarTimer = setTimeout(loadRadar, 5000);
+}
+
+function compactNumber(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = Number(value);
+  if (number >= 10_000) return `${(number / 10_000).toFixed(number >= 100_000 ? 0 : 1)}万`;
+  return number.toLocaleString("zh-CN");
+}
+
+function radarRow(row) {
+  const cover = row.cover
+    ? `<img class="radar-cover" loading="lazy" alt="" src="/api/radar/cover?id=${encodeURIComponent(row.id)}">`
+    : `<span class="radar-cover empty">无封面</span>`;
+  const tags = [
+    `<span class="kprop radar-platform ${escapeHtml(row.platform)}">${PLATFORM_NAMES[row.platform] || escapeHtml(row.platform)}</span>`,
+    row.listicle ? `<span class="kprop radar-listicle">清单</span>` : "",
+    ...(row.keywords || []).map((word) => `<span class="kprop">${escapeHtml(word)}</span>`),
+  ].join("");
+  const day = row.published_at ? formatRecent(row.published_at) : "";
+  const meta = [row.author, day].filter(Boolean).map(escapeHtml).join(" · ");
+  const likes = row.platform === "xiaohongshu"
+    ? `${compactNumber(row.likes)}<small>藏 ${compactNumber(row.collects)}</small>`
+    : `${compactNumber(row.likes)}${row.plays ? `<small>播 ${compactNumber(row.plays)}</small>` : ""}`;
+  const multiplier = row.multiplier === null || row.multiplier === undefined
+    ? `<span class="radar-mult pending" title="粉丝还没补查到">待定</span>`
+    : `<span class="radar-mult${row.multiplier >= 30 ? " hot" : ""}">${escapeHtml(row.multiplier)}×</span>`;
+  let actions;
+  if (row.status === "adopted") {
+    actions = row.candidate
+      ? `<a class="ghost-button radar-btn" href="#" data-note-path="${escapeHtml(row.candidate)}">打开候选</a>`
+      : `<span class="kprop status">已加入</span>`;
+  } else if (row.status === "rejected" || row.status === "seen") {
+    actions = `<button class="ghost-button radar-btn" type="button" data-radar-action="restore" data-radar-id="${escapeHtml(row.id)}">恢复</button>`;
+  } else {
+    actions = `
+      <button class="primary-button slim radar-btn" type="button" data-radar-action="adopt" data-radar-id="${escapeHtml(row.id)}">加入选题</button>
+      <button class="ghost-button radar-btn" type="button" data-radar-action="reject" data-radar-id="${escapeHtml(row.id)}" title="按住 ⇧ 点击：同时屏蔽这个作者">不合适</button>`;
+  }
+  return `
+    <article class="radar-row" data-radar-row="${escapeHtml(row.id)}">
+      ${cover}
+      <div class="radar-main">
+        <a class="radar-title" href="${escapeHtml(safeHttpUrl(row.url))}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(row.desc || row.title)}">${escapeHtml(row.title)} <span class="radar-ext">↗</span></a>
+        <div class="radar-meta">${meta}</div>
+        <div class="radar-tags">${tags}</div>
+      </div>
+      <div class="radar-num radar-fans"><span>粉丝</span><b>${compactNumber(row.fans)}</b></div>
+      <div class="radar-num radar-likes"><span>点赞</span><b>${likes}</b></div>
+      <div class="radar-num radar-multcol"><span>倍数</span><b>${multiplier}</b></div>
+      <div class="radar-actions">${actions}</div>
+    </article>`;
+}
+
+function renderRadar() {
+  const radar = state.radar;
+  const section = $("#radar");
+  if (!radar || radar.installed === false) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const rows = radar.items || [];
+  const counts = Object.fromEntries(RADAR_TABS.map((tab) => [tab.key, rows.filter(tab.match).length]));
+  const badge = $("#badge-radar");
+  badge.textContent = counts.new;
+  badge.hidden = !counts.new;
+  $("#radar-tabs").innerHTML = RADAR_TABS.map((tab) => `
+    <button class="filter-tab${tab.key === state.radarTab ? " active" : ""}" type="button" role="tab" data-radar-tab="${tab.key}" aria-selected="${tab.key === state.radarTab}">
+      ${tab.name} <span class="radar-count">${counts[tab.key]}</span>
+    </button>`).join("");
+
+  const last = radar.last_run || {};
+  const info = radar.running
+    ? "正在抓取…"
+    : last.at
+      ? `上次抓取 ${formatDay(last.at)} · ${last.calls} 次调用 · $${Number(last.cost_usd || 0).toFixed(3)}${last.errors?.length ? ` · ${last.errors.length} 个错误` : ""}`
+      : "还没抓取过";
+  $("#radar-run-info").textContent = info;
+  $("#radar-run-info").title = (last.errors || []).join("\n");
+  $("#radar-run").disabled = Boolean(radar.running);
+
+  const tab = RADAR_TABS.find((item) => item.key === state.radarTab) || RADAR_TABS[0];
+  const visible = rows.filter(tab.match);
+  if (radar.error) {
+    $("#radar-list").innerHTML = `<p class="radar-empty">雷达没有读出来：${escapeHtml(radar.error)}</p>`;
+  } else if (!visible.length) {
+    const hint = last.at ? "这一栏暂时没有内容。" : "点右上角「重新获取」拉第一轮数据（约 $0.16）。";
+    $("#radar-list").innerHTML = `<p class="radar-empty">${hint}</p>`;
+  } else {
+    $("#radar-list").innerHTML = visible.slice(0, state.radarLimit).map(radarRow).join("");
+  }
+  $("#radar-more").hidden = visible.length <= state.radarLimit;
+  $("#radar-more").textContent = `显示更多（还有 ${Math.max(0, visible.length - state.radarLimit)} 条）`;
+  $$("#radar-list img.radar-cover").forEach((img) => img.addEventListener("error", () => img.classList.add("broken"), { once: true }));
+}
+
+async function radarAction(button, blockAuthor = false) {
+  const id = button.dataset.radarId;
+  const action = button.dataset.radarAction;
+  button.disabled = true;
+  try {
+    const result = await api("/api/radar/action", {
+      method: "POST",
+      body: JSON.stringify({ id, action, block_author: blockAuthor }),
+    });
+    const row = (state.radar.items || []).find((item) => item.id === id);
+    if (row) {
+      row.status = action === "restore" ? "new" : action === "adopt" ? "adopted" : "rejected";
+      if (action === "adopt") row.candidate = result.candidate;
+    }
+    const messages = {
+      adopt: result.existing ? "这条之前已经加入过候选选题" : "已加入候选选题，7 天内没立项会自动关闭",
+      reject: blockAuthor ? "已标记不合适，并屏蔽了这个作者" : "已标记不合适",
+      restore: "已恢复到新题",
+    };
+    showToast(messages[action] || "已完成");
+    if (blockAuthor || action === "restore") await loadRadar();
+    else renderRadar();
+    if (action === "adopt") loadDashboard({ quiet: true });
+  } catch (error) {
+    showToast(error.message);
+    button.disabled = false;
+  }
+}
+
+async function startRadarRun() {
+  const button = $("#radar-run");
+  button.disabled = true;
+  try {
+    await api("/api/radar/run", { method: "POST", body: "{}" });
+    showToast("雷达开始抓取，一般一两分钟");
+    await loadRadar();
+  } catch (error) {
+    showToast(error.message);
+    button.disabled = false;
+  }
+}
+
+function bindRadarEvents() {
+  $("#radar-run").addEventListener("click", startRadarRun);
+  $("#radar-more").addEventListener("click", () => {
+    state.radarLimit += 40;
+    renderRadar();
+  });
+  $("#radar-tabs").addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-radar-tab]");
+    if (!tab) return;
+    state.radarTab = tab.dataset.radarTab;
+    state.radarLimit = 40;
+    renderRadar();
+  });
+  $("#radar-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-radar-action]");
+    if (!button) return;
+    event.preventDefault();
+    radarAction(button, event.shiftKey && button.dataset.radarAction === "reject");
+  });
+}
+
 function bindEvents() {
   $("#refresh").addEventListener("click", () => loadDashboard());
   $("#hero-index").addEventListener("click", () => jumpTo($("#hero-index").dataset.target));
@@ -2276,10 +2460,12 @@ function bindEvents() {
     if (!visible) return;
     $$(".rail-link").forEach((link) => link.classList.toggle("active", link.getAttribute("href") === `#${visible.target.id}`));
   }, { rootMargin: "-20% 0px -60%", threshold: [0, .2, .6] });
-  ["today", "review", "board", "knowledge"].forEach((id) => observer.observe(document.getElementById(id)));
+  ["today", "review", "board", "radar", "knowledge"].forEach((id) => observer.observe(document.getElementById(id)));
 }
 
 bindEvents();
+bindRadarEvents();
 renderNotifyToggle();
 connectEvents();
 loadDashboard({ quiet: true });
+loadRadar();

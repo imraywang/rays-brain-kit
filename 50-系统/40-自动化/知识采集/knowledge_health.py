@@ -2137,14 +2137,17 @@ def generate_weekly_with_codex(context: dict[str, Any], period: str) -> str:
 {json.dumps(context, ensure_ascii=False, indent=2)}
 """
     codex = config.get("codex_path", "/opt/homebrew/bin/codex")
-    model = config.get("codex_model", "gpt-5.5")
     with tempfile.NamedTemporaryFile(prefix="knowledge-weekly-", suffix=".md", delete=False) as file:
         output = Path(file.name)
     cmd = [
         codex, "exec", "--ephemeral", "--sandbox", "read-only",
-        "--skip-git-repo-check", "-C", str(VAULT), "--model", model,
+        "--skip-git-repo-check", "-C", str(VAULT),
         "-o", str(output), "-",
     ]
+    # 没配置就跟随 Codex 默认模型；写死的型号会随账号支持范围变化而失效
+    model = config.get("codex_model")
+    if model:
+        cmd[2:2] = ["--model", model]
     try:
         proc = subprocess.run(cmd, input=prompt, text=True, capture_output=True, timeout=600)
         if proc.returncode != 0:

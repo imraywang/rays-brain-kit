@@ -1286,6 +1286,44 @@ review_after: 2000-01-01
         card = dashboard.load_reviews()[0]
         self.assertEqual(card["source_note"], "30-资料/30-X书签/原帖.md")
 
+    def test_radar_is_optional_when_module_missing(self) -> None:
+        with mock.patch.object(dashboard, "RADAR_SCRIPT", self.vault / "missing/radar.py"), \
+                mock.patch.dict(dashboard._RADAR, {"module": None}):
+            self.assertEqual(dashboard.radar_payload(), {"installed": False})
+            with self.assertRaises(ValueError):
+                dashboard.radar_action("douyin:1", "adopt", "", False)
+
+    def test_radar_adopt_writes_candidate_into_topics_dir(self) -> None:
+        radar_script = SERVER_PATH.parents[1] / "爆款雷达" / "radar.py"
+        if not radar_script.is_file():
+            self.skipTest("skill 资产不带爆款雷达")
+        state = self.vault / ".state"
+        with mock.patch.dict(os.environ, {"RAYS_BRAIN_STATE": str(state)}):
+            spec = importlib.util.spec_from_file_location("radar_for_server_test", radar_script)
+            radar = importlib.util.module_from_spec(spec)
+            assert spec.loader
+            spec.loader.exec_module(radar)
+        item = radar.douyin_item(
+            {"item_id": "9", "item_title": "为什么一句狠话要五次温柔才能抵消", "nick_name": "某号",
+             "fans_cnt": 5008, "like_cnt": 318425, "play_cnt": 3000000, "publish_time": 1792700000},
+            "Vibe知识大赏",
+            "2026-10-26T08:00:00-07:00",
+        )
+        radar.write_json(radar.ITEMS_FILE, {item["id"]: item})
+        with mock.patch.object(dashboard, "RADAR_SCRIPT", radar_script), \
+                mock.patch.dict(dashboard._RADAR, {"module": radar}), \
+                mock.patch.object(dashboard, "log_operation") as log_operation:
+            payload = dashboard.radar_payload()
+            self.assertTrue(payload["installed"])
+            self.assertEqual([row["id"] for row in payload["items"]], ["douyin:9"])
+            result = dashboard.radar_action("douyin:9", "adopt", "用负面偏差讲关系", False)
+        note = self.vault / result["candidate"]
+        self.assertTrue(result["candidate"].startswith(dashboard.LAYOUT["topics_dir"]))
+        self.assertIn("kind: topic-candidate", note.read_text(encoding="utf-8"))
+        log_operation.assert_called_once()
+        self.assertEqual(log_operation.call_args.args[0]["op"], "radar-adopt")
+
+
 
 class ObsidianViewsTests(unittest.TestCase):
     views = dashboard.obsidian_views

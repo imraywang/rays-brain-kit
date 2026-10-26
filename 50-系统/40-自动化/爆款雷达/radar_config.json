@@ -1,0 +1,50 @@
+{
+  "douyin": {
+    "keywords": [
+      "Vibe知识大赏",
+      "vibecoding",
+      "Claude",
+      "大模型",
+      "科普",
+      "Skill",
+      "提示词"
+    ],
+    "pages": 2,
+    "page_size": 50,
+    "date_window_hours": 168,
+    "max_fans": 50000,
+    "min_interactions": 10000,
+    "min_multiplier": 3,
+    "max_age_days": 14
+  },
+  "xiaohongshu": {
+    "enabled": true,
+    "keywords": [
+      "AI科普",
+      "Claude Code",
+      "大模型",
+      "Skill",
+      "提示词"
+    ],
+    "sort_type": "general",
+    "time_filter": "一周内",
+    "max_fans": 10000,
+    "min_interactions": 1000,
+    "min_multiplier": 1,
+    "max_age_days": 14,
+    "enrich_limit": 10
+  },
+  "listicle_pattern": "必装|必备|必看|合集|盘点|清单|神器|TOP\\s*\\d+|top\\s*\\d+|[\\d一二三四五六七八九十两]+\\s*[个款条招种大][^，。！？、\\s]{0,6}?(?:技巧|工具|Skill|skill|插件|网站|提示词|指令|命令|App|APP|app|用法|模板|习惯|开源项目|网站)",
+  "exclude_words": [
+    "漫剧",
+    "短剧",
+    "霸总",
+    "cos",
+    "MV",
+    "金主训",
+    "梦女"
+  ],
+  "max_calls": 40,
+  "retention_days": 30,
+  "author_cache_days": 30
+}

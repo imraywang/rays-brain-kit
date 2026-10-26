@@ -305,6 +305,7 @@ button.hero-index:focus-visible { outline: 2px solid var(--accent); outline-offs
 .pipeline-section,
 .review-section,
 .board-section,
+.radar-section,
 .knowledge-section {
   margin-top: 44px;
   scroll-margin-top: 72px;
@@ -669,7 +670,7 @@ footer { display: flex; justify-content: space-between; gap: 18px; margin-top: 4
   body { padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
   .rail { inset: auto 0 0; width: 100%; height: calc(60px + env(safe-area-inset-bottom)); padding: 5px 8px env(safe-area-inset-bottom); flex-direction: row; align-items: center; border-top: 1px solid var(--rule); border-right: 0; background: rgba(251, 251, 250, .96); backdrop-filter: blur(16px); }
   .brand, .rail-label, .rail-bottom .subtle { display: none; }
-  .rail-nav { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; }
+  .rail-nav { flex: 1; display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; }
   .rail-link { min-height: 46px; display: grid; place-items: center; gap: 1px; padding: 2px 0; font-size: 10px; }
   .rail-link span { width: 22px; height: 22px; font-size: 16px; }
   .rail-link:hover { background: transparent; }
@@ -1234,3 +1235,50 @@ a.perf-row:hover { background: var(--hover); }
 .bets-stale { color: var(--orange); }
 .focus-bets a { color: var(--accent); text-decoration: none; }
 .kprop.focus, .tag.focus { color: var(--purple); background: var(--purple-soft); }
+
+/* ---- 爆款雷达 ---- */
+
+.radar-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.radar-tabs { flex-wrap: wrap; }
+.radar-count { margin-left: 3px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.radar-run { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11.5px; }
+.radar-run .ghost-button { min-height: 30px; font-size: 12px; }
+.radar-run .ghost-button:disabled { cursor: progress; opacity: .6; }
+.radar-list { border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }
+.radar-row { display: grid; grid-template-columns: 64px minmax(0, 1fr) 64px 84px 64px 172px; align-items: center; gap: 14px; padding: 10px 13px; border-bottom: 1px solid var(--rule); font-size: 12px; }
+.radar-row:last-child { border-bottom: 0; }
+.radar-row:hover { background: var(--surface-raised); }
+.radar-cover { width: 64px; height: 84px; border-radius: var(--radius-sm); object-fit: cover; background: var(--gray-soft); }
+.radar-cover.empty, .radar-cover.broken { display: grid; place-items: center; color: var(--muted); font-size: 10px; }
+.radar-cover.broken { visibility: hidden; }
+.radar-main { min-width: 0; }
+.radar-title { display: -webkit-box; overflow: hidden; color: var(--ink); font-size: 13.5px; font-weight: 600; line-height: 1.4; text-decoration: none; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.radar-title:hover { color: var(--accent); }
+.radar-ext { color: var(--muted); font-size: 11px; font-weight: 400; }
+.radar-meta { margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.radar-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.kprop.radar-platform.douyin { color: var(--ink); background: var(--gray-soft); font-weight: 600; }
+.kprop.radar-platform.xiaohongshu { color: var(--red); background: var(--red-soft); font-weight: 600; }
+.kprop.radar-listicle { color: var(--orange); background: var(--orange-soft); }
+.radar-num { display: grid; gap: 2px; font-variant-numeric: tabular-nums; }
+.radar-num > span { color: var(--muted); font-size: 10.5px; }
+.radar-num b { display: grid; font-size: 13px; font-weight: 600; }
+.radar-num small { color: var(--muted); font-size: 10.5px; font-weight: 400; }
+.radar-mult { color: var(--green); }
+.radar-mult.hot { color: var(--red); }
+.radar-mult.pending { color: var(--muted); font-weight: 400; }
+.radar-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.radar-btn { min-height: 30px; padding: 0 11px; font-size: 12px; text-decoration: none; display: inline-flex; align-items: center; }
+.radar-btn:disabled { opacity: .5; cursor: progress; }
+.radar-empty { margin: 0; padding: 28px 16px; color: var(--muted); font-size: 12.5px; text-align: center; }
+.radar-more { display: block; margin: 10px auto 0; }
+
+@media (max-width: 780px) {
+  .radar-section { margin-top: 32px; }
+  .radar-row { grid-template-columns: 56px minmax(0, 1fr) 56px; grid-template-areas: "cover main mult" "cover actions actions"; row-gap: 8px; }
+  .radar-cover { grid-area: cover; width: 56px; height: 74px; }
+  .radar-main { grid-area: main; }
+  .radar-fans, .radar-likes { display: none; }
+  .radar-multcol { grid-area: mult; }
+  .radar-actions { grid-area: actions; justify-content: flex-start; }
+}

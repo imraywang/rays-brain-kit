@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import ipaddress
 import json
 import os
@@ -55,6 +56,7 @@ BOARD_PROTOCOL_FILE = HERE.parent / "board_protocol.json"
 INGEST_SCRIPT = HERE.parent / "知识采集" / "knowledge_ingest.py"
 RECORD_SCRIPT = HERE.parent / "发布归档" / "record_published.py"
 DRAFT_WORKER_SCRIPT = HERE.parent / "AI执行" / "draft_worker.py"
+RADAR_SCRIPT = HERE.parent / "爆款雷达" / "radar.py"
 STATE_HOME = Path(
     os.environ.get("RAYS_BRAIN_STATE", str(Path.home() / ".local/state/rays-brain"))
 )
@@ -2176,6 +2178,83 @@ def start_manual_run() -> dict[str, object]:
     return {"ok": True, "started_at": started_at}
 
 
+_RADAR: dict[str, object] = {"module": None, "proc": None, "started_at": ""}
+
+
+def radar_module():
+    """爆款雷达是可选模块（kit 版可能没有），按文件路径懒加载。"""
+    if _RADAR["module"] is None:
+        if not RADAR_SCRIPT.is_file():
+            raise ValueError("没有安装爆款雷达")
+        os.environ.setdefault("RAYS_BRAIN_STATE", str(STATE_HOME))
+        spec = importlib.util.spec_from_file_location("radar", RADAR_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader
+        spec.loader.exec_module(module)
+        _RADAR["module"] = module
+    return _RADAR["module"]
+
+
+def radar_run_running() -> bool:
+    proc = _RADAR["proc"]
+    return proc is not None and proc.poll() is None  # type: ignore[union-attr]
+
+
+def radar_payload() -> dict[str, object]:
+    if not RADAR_SCRIPT.is_file():
+        return {"installed": False}
+    view = radar_module().radar_view()
+    return {
+        "installed": True,
+        "running": radar_run_running(),
+        "run_started_at": _RADAR["started_at"] if radar_run_running() else "",
+        **view,
+    }
+
+
+def radar_action(item_id: str, action: str, angle: str, block_author: bool) -> dict[str, object]:
+    radar = radar_module()
+    if action == "adopt":
+        result = radar.adopt_item(
+            item_id,
+            angle,
+            vault=VAULT,
+            topics_dir=LAYOUT["topics_dir"],
+            attention_days=TOPIC_ATTENTION_DAYS,
+        )
+    elif action in {"reject", "seen", "restore"}:
+        result = radar.mark_item(item_id, action, block_author=block_author)
+    else:
+        raise ValueError("操作不存在")
+    log_operation({"op": f"radar-{action}", "id": item_id, **({"candidate": result.get("candidate")} if action == "adopt" else {})})
+    return result
+
+
+def start_radar_run() -> dict[str, object]:
+    if radar_run_running():
+        raise ValueError("雷达正在抓取，请等它跑完")
+    if not RADAR_SCRIPT.is_file():
+        raise ValueError("没有安装爆款雷达")
+    env = {**os.environ, "RAYS_BRAIN_STATE": str(STATE_HOME)}
+    log_dir = STATE_HOME / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    with (log_dir / "radar-run.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"\n===== 工作台手动抓取 {started_at} =====\n")
+        handle.flush()
+        proc = subprocess.Popen(
+            [sys.executable, str(RADAR_SCRIPT), "fetch"],
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=str(RADAR_SCRIPT.parent),
+        )
+    _RADAR["proc"] = proc
+    _RADAR["started_at"] = started_at
+    log_operation({"op": "radar-run", "started_at": started_at})
+    return {"ok": True, "started_at": started_at}
+
+
 def resolve_pipeline_error(at: str, message: str) -> dict[str, object]:
     """在管线状态里标记一条错误已解决。与 30 分钟任务并发写有极小竞态，原子替换兜底。"""
     state_file = STATE_HOME / "state.json"
@@ -2691,6 +2770,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_bytes(asset.read_bytes(), ASSET_TYPES[asset.suffix.lower()])
             return
+        if parsed.path == "/api/radar":
+            self.send_json(radar_payload())
+            return
+        if parsed.path == "/api/radar/cover":
+            params = parse_qs(parsed.query)
+            try:
+                data, content_type = radar_module().cover_bytes(params.get("id", [""])[0])
+            except ValueError as exc:
+                self.error_json(str(exc), HTTPStatus.NOT_FOUND)
+                return
+            self.send_bytes(data, content_type)
+            return
         if parsed.path == "/api/events":
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -2832,6 +2923,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         str(payload.get("reason", "")),
                     )
                 )
+            elif parsed.path == "/api/radar/action":
+                self.send_json(
+                    radar_action(
+                        str(payload.get("id", "")),
+                        str(payload.get("action", "")),
+                        str(payload.get("angle", "")),
+                        bool(payload.get("block_author")),
+                    )
+                )
+            elif parsed.path == "/api/radar/run":
+                self.send_json(start_radar_run())
             elif parsed.path == "/api/publish/record":
                 self.send_json(
                     record_publication(

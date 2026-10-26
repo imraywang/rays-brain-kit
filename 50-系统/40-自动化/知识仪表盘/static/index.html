@@ -25,6 +25,7 @@
         <a class="rail-link active" href="#today"><span>☀️</span>今日</a>
         <a class="rail-link" href="#review"><span>📥</span>审核<em class="rail-badge red" id="badge-review" hidden></em></a>
         <a class="rail-link" href="#board"><span>📋</span>看板<em class="rail-badge yellow" id="badge-board" hidden></em></a>
+        <a class="rail-link" href="#radar"><span>📡</span>雷达<em class="rail-badge yellow" id="badge-radar" hidden></em></a>
         <a class="rail-link" href="#knowledge"><span>🌱</span>知识</a>
       </nav>
 
@@ -160,6 +161,25 @@
             <p>拖前两列勾选或撤回，候选拖到「写作任务」直接立项；点卡片在工作台内阅读，状态流转都在阅读面板里完成</p>
           </div>
           <div class="board" id="board-columns"></div>
+        </section>
+
+        <section class="radar-section" id="radar" aria-labelledby="radar-title" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Radar</p>
+              <h2 id="radar-title">📡 爆款雷达</h2>
+            </div>
+            <p>抖音低粉爆款榜和小红书搜索里，粉丝少却爆了的题。「加入选题」进候选池，「不合适」以后不再出现；倍数 = 互动 ÷ 粉丝</p>
+          </div>
+          <div class="radar-toolbar">
+            <div class="filter-tabs radar-tabs" id="radar-tabs" role="tablist" aria-label="雷达分类"></div>
+            <div class="radar-run">
+              <span id="radar-run-info"></span>
+              <button class="ghost-button" id="radar-run" type="button">重新获取</button>
+            </div>
+          </div>
+          <div class="radar-list" id="radar-list"></div>
+          <button class="ghost-button radar-more" id="radar-more" type="button" hidden>显示更多</button>
         </section>
 
         <section class="performance-section" id="performance" aria-labelledby="performance-title">

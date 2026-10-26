@@ -13,6 +13,7 @@
 | 库结构模板 | 目录骨架由 bootstrap 生成 | 无（纯文件夹约定） |
 | 本地知识工作台 | `50-系统/40-自动化/知识仪表盘/` | 仅 Python 3 标准库 |
 | AI 采集管线 | `50-系统/40-自动化/知识采集/` | Python 3 + [Codex CLI](https://github.com/openai/codex) + [xurl](https://github.com/xdevplatform/xurl)（可选） |
+| 爆款选题雷达（可选） | `50-系统/40-自动化/爆款雷达/` | Python 3 + curl + [TikHub](https://tikhub.io) API key（按次计费） |
 
 ## 五分钟看到工作台
 

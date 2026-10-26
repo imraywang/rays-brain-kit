@@ -7,7 +7,6 @@
   "x_article_backfill": true,
   "mobile_inbox": "",
   "codex_path": "codex",
-  "codex_model": "gpt-5.5",
   "daily_report_keep_days": 7,
   "weekly_report_keep_weeks": 8,
   "review_batch_size": 8,
