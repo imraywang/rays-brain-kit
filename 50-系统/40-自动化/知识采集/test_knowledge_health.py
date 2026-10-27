@@ -446,6 +446,60 @@ freshness_status: stale
             {"source": "10-创作/候选.md", "target": "旧知识"}
         ])
 
+    def test_skips_hidden_directories_when_checking_links(self) -> None:
+        self.write(".claude/worktrees/副本/20-知识/笔记.md", "[[不存在]]")
+        self.write(".obsidian/workspace.json", '{"x": "[[不存在]]"}')
+        self.write("50-系统/30-模板/模板.md", "[[YYYY-MM-DD-占位]]")
+        self.write("30-资料/70-人物语料/_模板/风格画像.md", "![[XX-style.png]]")
+        self.write("20-知识/10-概念/笔记.md", "[[另一篇]]")
+        self.write("20-知识/10-概念/另一篇.md", "正文")
+
+        checked, broken, cleanup_only = health.resolve_wikilinks()
+
+        self.assertEqual(checked, 1)
+        self.assertEqual(broken, [])
+        self.assertEqual(cleanup_only, [])
+
+    def test_resolves_table_aliases_attachments_and_folders(self) -> None:
+        self.write(
+            "30-资料/70-人物语料/甲/索引.md",
+            "| 期 | 链接 |\n|---|---|\n"
+            "| 1 | [[30-资料/70-人物语料/甲/podcast/第一期\\|第一期]] |\n"
+            "![[卡片.png]]\n"
+            "[[60-素材/10-图片/10-封面/某期封面]]\n"
+            "[[60-素材/10-图片/10-封面/某期封面/]]\n",
+        )
+        self.write("30-资料/70-人物语料/甲/podcast/第一期.md", "正文")
+        self.write("30-资料/70-人物语料/甲/_cards/卡片.png", "png")
+        self.write("60-素材/10-图片/10-封面/某期封面/cover.png", "png")
+        self.write(
+            "30-资料/70-人物语料/甲/留存.json",
+            '{"link": "[[30-资料/40-网页剪藏/Sam \\"Startup\\"]]",'
+            ' "row": "| [[30-资料/70-人物语料/甲/podcast/第一期\\\\|第一期]] |"}',
+        )
+        self.write('30-资料/40-网页剪藏/Sam "Startup".md', "正文")
+
+        checked, broken, cleanup_only = health.resolve_wikilinks()
+
+        self.assertEqual(checked, 6)
+        self.assertEqual(broken, [])
+        self.assertEqual(cleanup_only, [])
+
+    def test_still_flags_missing_attachment_and_table_link(self) -> None:
+        self.write(
+            "20-知识/10-概念/笔记.md",
+            "| [[不存在的笔记\\|别名]] |\n![[不存在.png]]\n",
+        )
+
+        checked, broken, cleanup_only = health.resolve_wikilinks()
+
+        self.assertEqual(checked, 2)
+        self.assertEqual(broken, [
+            {"source": "20-知识/10-概念/笔记.md", "target": "不存在的笔记\\|别名"},
+            {"source": "20-知识/10-概念/笔记.md", "target": "不存在.png"},
+        ])
+        self.assertEqual(cleanup_only, [])
+
     def test_flags_unresolved_frontmatter_author_link(self) -> None:
         self.write(
             "30-资料/40-网页剪藏/剪藏.md",

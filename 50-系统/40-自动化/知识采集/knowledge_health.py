@@ -1433,12 +1433,23 @@ def resolve_wikilinks() -> tuple[
     list[dict[str, str]],
     list[dict[str, str]],
 ]:
-    all_files = [p for p in VAULT.rglob("*") if p.is_file() and ".git" not in p.parts]
-    rel_files = {p.relative_to(VAULT).as_posix(): p for p in all_files}
+    # 隐藏目录（.git、.claude 会话工作副本、.obsidian、.trash）不属于知识库正文
+    rel_files: dict[str, Path] = {}
+    rel_dirs: set[str] = set()
+    for root, dirnames, filenames in os.walk(VAULT):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+        root_path = Path(root)
+        for name in dirnames:
+            rel_dirs.add((root_path / name).relative_to(VAULT).as_posix())
+        for name in filenames:
+            path = root_path / name
+            rel_files[path.relative_to(VAULT).as_posix()] = path
     cleanup_prefix = "90-归档/90-待清理/"
     stems: dict[str, list[str]] = defaultdict(list)
+    names: dict[str, list[str]] = defaultdict(list)
     for rel, path in rel_files.items():
         stems[path.stem].append(rel)
+        names[path.name].append(rel)
 
     def classify(matches: list[str]) -> str:
         if any(not match.startswith(cleanup_prefix) for match in matches):
@@ -1448,7 +1459,11 @@ def resolve_wikilinks() -> tuple[
         return "missing"
 
     def resolve(source: Path, raw: str) -> str:
-        target = raw.split("|", 1)[0].split("#", 1)[0].strip()
+        if source.suffix == ".json":
+            # JSON 字符串里的 \\ 和 \" 是转义，先还原成笔记里的原文
+            raw = raw.replace("\\\\", "\\").replace('\\"', '"')
+        # 表格里的别名要写成 [[目标\|别名]]，反斜杠不属于目标
+        target = re.split(r"\\?\|", raw, maxsplit=1)[0].split("#", 1)[0].strip()
         if not target or "://" in target or target == "wikilinks":
             return "active"
         suffix = PurePosixPath(target).suffix.lower()
@@ -1457,6 +1472,9 @@ def resolve_wikilinks() -> tuple[
         exact = [candidate for candidate in candidates if candidate in rel_files]
         if exact:
             return classify(exact)
+        folder = target.rstrip("/")
+        if folder in rel_dirs:
+            return classify([folder + "/"])
         source_rel = source.relative_to(VAULT).parent
         relative_matches = [
             (source_rel / candidate).as_posix()
@@ -1466,8 +1484,10 @@ def resolve_wikilinks() -> tuple[
         if relative_matches:
             return classify(relative_matches)
         if "/" not in target:
-            lookup = Path(target).stem if suffix in {".md", ".base"} else target
-            return classify(stems.get(lookup, []))
+            if suffix in {".md", ".base"}:
+                return classify(stems.get(Path(target).stem, []))
+            # 图片等附件按完整文件名找，笔记按文件名（不带 .md）找
+            return classify(stems.get(target, []) + names.get(target, []))
         return "missing"
 
     checked = 0
@@ -1476,6 +1496,9 @@ def resolve_wikilinks() -> tuple[
     pattern = re.compile(r"!?\[\[([^\]]+)\]\]")
     for rel, path in sorted(rel_files.items()):
         if path.suffix not in {".md", ".base", ".json"}:
+            continue
+        # 模板里的 [[XX-style.png]]、[[YYYY-MM-DD-…]] 是占位符，套用后才有目标
+        if rel.startswith("50-系统/30-模板/") or "_模板" in PurePosixPath(rel).parts:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         searchable = re.sub(r"```.*?```", "", text, flags=re.S)
