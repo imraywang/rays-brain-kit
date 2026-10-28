@@ -830,12 +830,16 @@ VIDEO_PLATFORM_LABELS = {
     "shipinhao": "视频号",
     "douyin": "抖音",
     "xiaohongshu": "小红书",
+    "youtube": "YouTube",
+    "bilibili": "B 站",
 }
 # 填了创作者后台地址，这篇就永远显得既已发布又信息齐全。
 BACKEND_URL_MARKS = {
     "shipinhao": "channels.weixin.qq.com/platform",
     "douyin": "creator.douyin.com",
     "xiaohongshu": "creator.xiaohongshu.com",
+    "youtube": "studio.youtube.com",
+    "bilibili": "member.bilibili.com",
 }
 
 
@@ -854,7 +858,7 @@ def published_metadata_issues() -> list[dict[str, Any]]:
         problems: list[str] = []
         published_status_keys = (
             "x_article_status", "wechat_status", "shipinhao_status",
-            "douyin_status", "xiaohongshu_status",
+            "douyin_status", "xiaohongshu_status", "youtube_status", "bilibili_status",
         )
         if meta.get("status", "").strip() == "published" and not any(
             meta.get(key, "").strip() == "published" for key in published_status_keys
@@ -936,6 +940,222 @@ def published_active_residue_issues() -> list[dict[str, str]]:
                 },
             )
     return [found[key] for key in sorted(found)]
+
+
+WIKILINK_TARGET = re.compile(r"\[\[([^\]|#]+)")
+VIDEO_STATUS_VALUES = {"published", "pending", "reviewing", "restricted", "private", "removed", "not-needed"}
+ACCOUNT_REQUIRED_STATUSES = {"published", "restricted", "private", "removed"}
+LOCAL_PATH_FIELDS = (
+    "video_project", "video_file", "video_file_douyin", "video_cover",
+    "video_cover_3x4", "video_cover_16x9",
+)
+STALE_DRAFT_DAYS = 7
+
+
+def link_targets(value: str) -> list[str]:
+    return [match.strip() for match in WIKILINK_TARGET.findall(value or "")]
+
+
+def note_by_target(target: str) -> Path | None:
+    path = VAULT / (target if target.endswith(".md") else target + ".md")
+    return path if path.is_file() else None
+
+
+def published_notes() -> list[tuple[Path, dict[str, str]]]:
+    root = VAULT / "40-发布"
+    notes: list[tuple[Path, dict[str, str]]] = []
+    if not root.exists():
+        return notes
+    for path in sorted(root.rglob("*.md")):
+        if CONTENT_FEEDBACK_DIR in path.parents:
+            continue
+        meta = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+        if meta.get("kind") in PUBLISHED_KINDS:
+            notes.append((path, meta))
+    return notes
+
+
+def publication_closeout_issues(now: datetime) -> dict[str, list[dict[str, str]]]:
+    """发布之后还开着的候选、被同一选题替代的旧稿，以及停在草稿区太久的稿子。"""
+    published = published_notes()
+    published_rels = {path.relative_to(VAULT).as_posix()[:-3] for path, _ in published}
+    candidate_to_published: dict[str, str] = {}
+    for path, meta in published:
+        for key in ("topic_candidate", "topic_card"):
+            for target in link_targets(meta.get(key, "")):
+                candidate_to_published.setdefault(target, path.relative_to(VAULT).as_posix())
+
+    open_candidates: list[dict[str, str]] = []
+    for target, published_file in sorted(candidate_to_published.items()):
+        candidate = note_by_target(target)
+        if candidate is None or CANDIDATE_DIR not in candidate.parents:
+            continue
+        status = normalized_status(
+            parse_frontmatter(candidate.read_text(encoding="utf-8", errors="replace"))
+        )
+        if status in {"candidate", "active", "selected", "writing"}:
+            open_candidates.append({
+                "file": candidate.relative_to(VAULT).as_posix(),
+                "published_file": published_file,
+                "issue": f"已发布，候选仍是 {status}",
+            })
+
+    sibling_drafts: list[dict[str, str]] = []
+    stale_drafts: list[dict[str, str]] = []
+    for root in (ARTICLE_DRAFT_DIR, ORAL_DRAFT_DIR):
+        for path in markdown_notes(root):
+            meta = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+            relative_path = path.relative_to(VAULT).as_posix()
+            reason = related = ""
+            for target in link_targets(meta.get("supersedes", "")):
+                # 新稿替代的是已经发布的正式稿时，新稿本身也多半已经发出去
+                if target in published_rels or target.startswith("90-归档/"):
+                    reason = "替代的旧版已发布或已归档，确认这一版是否也已发布"
+                    related = target + ".md"
+            for target in link_targets(meta.get("topic_candidate", "")):
+                if target in candidate_to_published and not reason:
+                    reason = "同一个候选已经发布过另一版"
+                    related = candidate_to_published[target]
+            if reason:
+                sibling_drafts.append({
+                    "file": relative_path,
+                    "published_file": related,
+                    "issue": reason,
+                })
+                continue
+            if meta.get("recording_status", "").strip() == "recorded":
+                continue
+            age = note_age_days(path, meta, now)
+            if age >= STALE_DRAFT_DAYS:
+                stale_drafts.append({
+                    "file": relative_path,
+                    "issue": f"{int(age)} 天没有推进（{normalized_status(meta) or '无状态'}），决定做还是不做",
+                })
+    return {
+        "open_candidates": open_candidates,
+        "sibling_drafts": sibling_drafts,
+        "stale_drafts": stale_drafts,
+    }
+
+
+def health_config() -> dict[str, Any]:
+    config = load_json(CONFIG_FILE, {})
+    return config if isinstance(config, dict) else {}
+
+
+def media_roots() -> list[Path]:
+    roots = health_config().get("media_roots", [])
+    return [Path(os.path.expanduser(str(root))) for root in roots if str(root).strip()]
+
+
+def resolve_media_path(value: str) -> tuple[str, Path | None]:
+    """返回 (ok|missing|unmounted, 实际找到的路径)。只写项目名时在 media_roots 里找。"""
+    raw = os.path.expanduser(value.strip().strip('"'))
+    path = Path(raw)
+    if not path.is_absolute():
+        for root in media_roots():
+            if (root / raw).exists():
+                return "ok", root / raw
+        return "missing", None
+    if path.exists():
+        return "ok", path
+    parts = path.parts
+    if len(parts) > 2 and parts[1] == "Volumes" and not Path("/", *parts[:3]).exists():
+        return "unmounted", None
+    # 项目整体搬家后，在其他根目录下找同名目录；项目还在原处说明只是文件没了
+    project_index = next(
+        (index for index, part in enumerate(parts) if re.match(r"\d{4}-\d{2}-\d{2}-", part)), -1
+    )
+    if project_index < 0 or Path(*parts[:project_index + 1]).exists():
+        return "missing", None
+    for root in media_roots():
+        if (root / parts[project_index]).exists():
+            return "missing", root / parts[project_index]
+    return "missing", None
+
+
+def local_path_issues() -> tuple[list[dict[str, str]], int]:
+    """已发布内容里填写的本地路径要能打开；外置盘没接上时只计数，不算错。"""
+    issues: list[dict[str, str]] = []
+    unmounted = 0
+    has_media_dir = (VAULT / "60-素材").is_dir()
+    for path, meta in published_notes():
+        problems: list[str] = []
+        for key in LOCAL_PATH_FIELDS:
+            value = meta.get(key, "").strip()
+            if not value or value.startswith(("http://", "https://")):
+                continue
+            status, found = resolve_media_path(value)
+            if status == "unmounted":
+                unmounted += 1
+            elif status == "missing":
+                hint = f"，同名项目在 {found}" if found else ""
+                problems.append(f"{key} 打不开{hint}")
+        cover = meta.get("cover_dir", "")
+        if has_media_dir:
+            for target in link_targets(cover):
+                if not (VAULT / target).exists():
+                    problems.append("cover_dir 指向的封面目录不存在")
+        if problems:
+            issues.append({
+                "file": path.relative_to(VAULT).as_posix(),
+                "issue": "；".join(problems),
+            })
+    return issues, unmounted
+
+
+def platform_field_issues() -> list[dict[str, str]]:
+    """视频平台状态用固定取值；config 里配了多个抖音号时，已经发出的必须写明是哪个号。"""
+    accounts = {str(item) for item in health_config().get("douyin_accounts", [])}
+    issues: list[dict[str, str]] = []
+    for path, meta in published_notes():
+        if meta.get("kind") != "video-published":
+            continue
+        problems: list[str] = []
+        for prefix in VIDEO_PLATFORM_LABELS:
+            value = meta.get(f"{prefix}_status", "").strip()
+            if value and value not in VIDEO_STATUS_VALUES:
+                problems.append(f"{prefix}_status 取值 {value} 不在约定里")
+        # 只有配置了多个抖音号时才要求写明账号；单号的库不需要这个字段
+        if accounts and meta.get("douyin_status", "").strip() in ACCOUNT_REQUIRED_STATUSES:
+            account = meta.get("douyin_account", "").strip()
+            if not account:
+                problems.append("抖音没写是哪个号（douyin_account）")
+            elif account not in accounts:
+                problems.append(f"douyin_account「{account}」不在 config 的 douyin_accounts 里")
+        if problems:
+            issues.append({
+                "file": path.relative_to(VAULT).as_posix(),
+                "issue": "；".join(problems),
+            })
+    return issues
+
+
+def backfill_pending_issues(now: datetime) -> list[dict[str, str]]:
+    """发布满 3 天仍没判断知识回写和剩余角度。只看 backfill_check_since 之后的发布。"""
+    since = parse_dt(str(health_config().get("backfill_check_since", "")))
+    if since is None:
+        return []
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=now.tzinfo)
+    issues: list[dict[str, str]] = []
+    for path, meta in published_notes():
+        published_at = dated_value(meta, ("publication_confirmed_at", "created_at"), now)
+        if published_at is None or published_at < since or now - published_at < timedelta(days=3):
+            continue
+        pending = [
+            label for key, label in (
+                ("knowledge_backfill_status", "知识回写"),
+                ("remaining_angles_status", "剩余角度"),
+            )
+            if meta.get(key, "pending").strip() in {"", "pending"}
+        ]
+        if pending:
+            issues.append({
+                "file": path.relative_to(VAULT).as_posix(),
+                "issue": "、".join(pending) + "还没判断（写 complete 或 not-needed）",
+            })
+    return issues
 
 
 def has_topic_freshness_anchor(meta: dict[str, str]) -> bool:
@@ -1081,6 +1301,8 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
     for path in markdown_notes(CONTENT_FEEDBACK_DIR):
         text = path.read_text(encoding="utf-8", errors="replace")
         meta = parse_frontmatter(text)
+        if meta.get("kind") == "data-snapshot":
+            continue  # 后台数据快照是一次性记录，不是待复盘的反馈卡
         status = normalized_status(meta)
         completed = status in FEEDBACK_DONE_STATUSES or any(
             meta.get(key, "").strip()
@@ -1137,6 +1359,10 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
     map_coverage_issues = knowledge_map_coverage_issues()
     publication_metadata = published_metadata_issues()
     publication_residue = published_active_residue_issues()
+    closeout = publication_closeout_issues(now)
+    path_issues, media_unmounted = local_path_issues()
+    platform_issues = platform_field_issues()
+    backfill_pending = backfill_pending_issues(now)
     overdue_candidates = {
         item["file"]: item
         for item in expired_candidates + review_overdue_candidates + stale_candidates
@@ -1195,10 +1421,56 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
         "published_metadata_issues": publication_metadata,
         "published_active_residue_count": len(publication_residue),
         "published_active_residue_issues": publication_residue,
+        "published_open_candidate_count": len(closeout["open_candidates"]),
+        "published_open_candidates": closeout["open_candidates"],
+        "sibling_draft_count": len(closeout["sibling_drafts"]),
+        "sibling_drafts": closeout["sibling_drafts"],
+        "stale_draft_count": len(closeout["stale_drafts"]),
+        "stale_drafts": closeout["stale_drafts"],
+        "local_path_issue_count": len(path_issues),
+        "local_path_issues": path_issues,
+        "media_unmounted_count": media_unmounted,
+        "platform_field_issue_count": len(platform_issues),
+        "platform_field_issues": platform_issues,
+        "backfill_pending_count": len(backfill_pending),
+        "backfill_pending_issues": backfill_pending,
     }
 
 
-def creation_alerts(metrics: dict[str, Any]) -> list[str]:
+# 长期积压：只有比上一份日报变多时才影响状态，否则放进「长期积压」，留给周报处理
+CHRONIC_ALERTS = {
+    "knowledge_provenance_issue_count": "篇长期知识来源缺失或失效",
+    "underlinked_knowledge_count": "篇长期知识少于 2 条有效连接",
+    "entity_identity_issue_count": "个对象档案存在重复、错位或身份缺失",
+    "knowledge_map_coverage_issue_count": "篇长期知识尚未进入真正的主题地图",
+}
+
+
+def chronic_backlog(metrics: dict[str, Any], previous: dict[str, Any] | None) -> list[str]:
+    if not previous:
+        return []
+    notes: list[str] = []
+    for key, text in CHRONIC_ALERTS.items():
+        count = metrics.get(key, 0)
+        if count and count <= previous.get(key, count):
+            notes.append(f"{count} {text}（未增加）")
+    return notes
+
+
+def chronic_unchanged(metrics: dict[str, Any], previous: dict[str, Any] | None, key: str) -> bool:
+    return bool(previous) and metrics.get(key, 0) <= previous.get(key, metrics.get(key, 0))
+
+
+def chronic_delta(metrics: dict[str, Any], previous: dict[str, Any] | None, key: str) -> str:
+    if not previous or key not in previous:
+        return ""
+    return f"（较上次 +{metrics.get(key, 0) - previous[key]}）"
+
+
+def creation_alerts(
+    metrics: dict[str, Any],
+    previous: dict[str, Any] | None = None,
+) -> list[str]:
     reasons: list[str] = []
     if metrics["active_candidate_count"] > 7:
         reasons.append(
@@ -1242,9 +1514,9 @@ def creation_alerts(metrics: dict[str, Any]) -> list[str]:
             "活跃审核目录混入 "
             f"{metrics['processed_review_in_active_count']} 张已处理卡"
         )
-    if metrics.get("knowledge_provenance_issue_count", 0):
+    if metrics.get("knowledge_provenance_issue_count", 0) and not chronic_unchanged(metrics, previous, "knowledge_provenance_issue_count"):
         reasons.append(
-            f"有 {metrics['knowledge_provenance_issue_count']} 篇长期知识来源缺失或失效"
+            f"有 {metrics['knowledge_provenance_issue_count']} 篇长期知识来源缺失或失效" + chronic_delta(metrics, previous, "knowledge_provenance_issue_count")
         )
     if metrics.get("review_source_issue_count", 0):
         reasons.append(
@@ -1258,25 +1530,49 @@ def creation_alerts(metrics: dict[str, Any]) -> list[str]:
         reasons.append(
             f"有 {metrics['writing_knowledge_handoff_issue_count']} 个写作任务没有继承候选知识"
         )
-    if metrics.get("underlinked_knowledge_count", 0):
+    if metrics.get("underlinked_knowledge_count", 0) and not chronic_unchanged(metrics, previous, "underlinked_knowledge_count"):
         reasons.append(
-            f"有 {metrics['underlinked_knowledge_count']} 篇长期知识少于 2 条有效连接"
+            f"有 {metrics['underlinked_knowledge_count']} 篇长期知识少于 2 条有效连接" + chronic_delta(metrics, previous, "underlinked_knowledge_count")
         )
-    if metrics.get("entity_identity_issue_count", 0):
+    if metrics.get("entity_identity_issue_count", 0) and not chronic_unchanged(metrics, previous, "entity_identity_issue_count"):
         reasons.append(
-            f"有 {metrics['entity_identity_issue_count']} 个对象档案存在重复、错位或身份缺失"
+            f"有 {metrics['entity_identity_issue_count']} 个对象档案存在重复、错位或身份缺失" + chronic_delta(metrics, previous, "entity_identity_issue_count")
         )
     if metrics.get("topic_knowledge_reference_issue_count", 0):
         reasons.append(
             f"有 {metrics['topic_knowledge_reference_issue_count']} 条候选的知识去向失效"
         )
-    if metrics.get("knowledge_map_coverage_issue_count", 0):
+    if metrics.get("knowledge_map_coverage_issue_count", 0) and not chronic_unchanged(metrics, previous, "knowledge_map_coverage_issue_count"):
         reasons.append(
-            f"有 {metrics['knowledge_map_coverage_issue_count']} 篇长期知识尚未进入真正的主题地图"
+            f"有 {metrics['knowledge_map_coverage_issue_count']} 篇长期知识尚未进入真正的主题地图" + chronic_delta(metrics, previous, "knowledge_map_coverage_issue_count")
         )
     if metrics.get("published_metadata_issue_count", 0):
         reasons.append(
             f"有 {metrics['published_metadata_issue_count']} 篇已发布内容的平台资料待确认或填写不正确"
+        )
+    if metrics.get("published_open_candidate_count", 0):
+        reasons.append(
+            f"有 {metrics['published_open_candidate_count']} 条候选对应的内容已经发布，候选还没关"
+        )
+    if metrics.get("sibling_draft_count", 0):
+        reasons.append(
+            f"有 {metrics['sibling_draft_count']} 份草稿的同一选题已经发布过，确认是已发还是作废"
+        )
+    if metrics.get("stale_draft_count", 0):
+        reasons.append(
+            f"有 {metrics['stale_draft_count']} 份草稿超过 {STALE_DRAFT_DAYS} 天没有推进"
+        )
+    if metrics.get("local_path_issue_count", 0):
+        reasons.append(
+            f"有 {metrics['local_path_issue_count']} 篇已发布内容的本地文件路径打不开"
+        )
+    if metrics.get("platform_field_issue_count", 0):
+        reasons.append(
+            f"有 {metrics['platform_field_issue_count']} 篇视频的平台状态或抖音账号没写对"
+        )
+    if metrics.get("backfill_pending_count", 0):
+        reasons.append(
+            f"有 {metrics['backfill_pending_count']} 篇发布满 3 天还没判断知识回写和剩余角度"
         )
     if metrics.get("published_active_residue_count", 0):
         reasons.append(
@@ -1436,7 +1732,7 @@ def resolve_wikilinks() -> tuple[
     # 隐藏目录（.git、.claude 会话工作副本、.obsidian、.trash）不属于知识库正文
     rel_files: dict[str, Path] = {}
     rel_dirs: set[str] = set()
-    for root, dirnames, filenames in os.walk(VAULT):
+    for root, dirnames, filenames in os.walk(VAULT, followlinks=True):
         dirnames[:] = [name for name in dirnames if not name.startswith(".")]
         root_path = Path(root)
         for name in dirnames:
@@ -1464,7 +1760,8 @@ def resolve_wikilinks() -> tuple[
             raw = raw.replace("\\\\", "\\").replace('\\"', '"')
         # 表格里的别名要写成 [[目标\|别名]]，反斜杠不属于目标
         target = re.split(r"\\?\|", raw, maxsplit=1)[0].split("#", 1)[0].strip()
-        if not target or "://" in target or target == "wikilinks":
+        # [[^块编号]] 是块引用，X 书签每次重抓都会还原原文里的这种写法
+        if not target or "://" in target or target == "wikilinks" or target.startswith("^"):
             return "active"
         suffix = PurePosixPath(target).suffix.lower()
         has_file_suffix = suffix in {".md", ".base", ".json"}
@@ -1759,7 +2056,7 @@ def collect_metrics() -> dict[str, Any]:
         yellow_reasons.append(
             f"有 {len(overdue_cleanup)} 个待清理目录已超过 {retention_days} 天，可确认后删除"
         )
-    yellow_reasons.extend(creation_alerts(creation))
+    yellow_reasons.extend(creation_alerts(creation, previous))
 
     health = "red" if red_reasons else "yellow" if yellow_reasons else "green"
     metrics = {
@@ -1769,6 +2066,7 @@ def collect_metrics() -> dict[str, Any]:
         "health": health,
         "red_reasons": red_reasons,
         "yellow_reasons": yellow_reasons,
+        "backlog_notes": chronic_backlog(creation, previous),
         "launch": launch,
         "automation_jobs": automation_jobs,
         "icloud": icloud,
@@ -1920,6 +2218,12 @@ def daily_report(metrics: dict[str, Any]) -> str:
         f"| 未进入主题地图 | {metrics.get('knowledge_map_coverage_issue_count', 0)} | 对象索引和总目录不计入主题覆盖 |",
         f"| 发布资料异常 | {metrics.get('published_metadata_issue_count', 0)} | 链接和时间可选；只检查已填写资料是否明显错误 |",
         f"| 发布后未收尾 | {metrics.get('published_active_residue_count', 0)} | 已发布的母稿、口播稿和成稿包应退出活跃目录 |",
+        f"| 已发布但候选未关 | {metrics.get('published_open_candidate_count', 0)} | 正式稿的 topic_candidate 指向的候选应关闭 |",
+        f"| 同一选题已发布的草稿 | {metrics.get('sibling_draft_count', 0)} | 被替代的旧版或另一版，确认已发还是作废 |",
+        f"| 停滞草稿 | {metrics.get('stale_draft_count', 0)} | 草稿区超过 {STALE_DRAFT_DAYS} 天没推进 |",
+        f"| 本地路径打不开 | {metrics.get('local_path_issue_count', 0)} | 外置盘未接上的 {metrics.get('media_unmounted_count', 0)} 处不计 |",
+        f"| 平台字段待补 | {metrics.get('platform_field_issue_count', 0)} | 状态取值和抖音账号 |",
+        f"| 发布后待判断回写 | {metrics.get('backfill_pending_count', 0)} | 发布满 3 天应写 complete 或 not-needed |",
         "",
         "## 主题地图候选",
         "",
@@ -1981,6 +2285,9 @@ def daily_report(metrics: dict[str, Any]) -> str:
     if reasons:
         lines.extend(["", "## 异常与提醒", ""])
         lines.extend(f"- {reason}" for reason in reasons)
+    if metrics.get("backlog_notes"):
+        lines.extend(["", "## 长期积压（没有变多，不影响状态，周报处理）", ""])
+        lines.extend(f"- {note}" for note in metrics["backlog_notes"])
     detail_groups = (
         ("过期或超期候选", metrics.get("overdue_candidates", [])),
         ("新鲜度资料不全", metrics.get("topic_freshness_missing", [])),
@@ -1997,6 +2304,12 @@ def daily_report(metrics: dict[str, Any]) -> str:
         ("未进入主题地图", metrics.get("knowledge_map_coverage_issues", [])),
         ("发布资料异常", metrics.get("published_metadata_issues", [])),
         ("发布后未收尾", metrics.get("published_active_residue_issues", [])),
+        ("已发布但候选未关", metrics.get("published_open_candidates", [])),
+        ("同一选题已发布的草稿", metrics.get("sibling_drafts", [])),
+        ("停滞草稿", metrics.get("stale_drafts", [])),
+        ("本地路径打不开", metrics.get("local_path_issues", [])),
+        ("平台字段待补", metrics.get("platform_field_issues", [])),
+        ("发布后待判断回写", metrics.get("backfill_pending_issues", [])),
     )
     details = [(title, items) for title, items in detail_groups if items]
     if details:
@@ -2035,6 +2348,13 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "- 未进入主题地图：长期知识还没有被任何 `map_role: theme` 地图引用；人物索引、产品模型索引、综合入口和地图总目录都不计入。",
         "- 发布资料异常：平台链接和发布时间可以留空；只有已经填写却明显是草稿编辑器或创作者后台地址时才提醒。",
         "- 发布后未收尾：正式稿已经存在，但对应母稿、口播稿或成稿包仍留在活跃生产目录。",
+        "- 已发布但候选未关：正式稿的 topic_candidate / topic_card 指向的候选仍是 candidate 或 active。",
+        "- 同一选题已发布的草稿：草稿的 supersedes 指向已发布或已归档的稿子，或与某篇正式稿共用 topic_candidate。",
+        f"- 停滞草稿：口播草稿和文章草稿里 {STALE_DRAFT_DAYS} 天没有更新、也没有录完的稿子。",
+        "- 本地路径打不开：正式稿里 video_project、video_file、封面等路径不存在；只写项目名时到 config 的 media_roots 里找；外置盘没接上时不算错。",
+        "- 平台字段待补：视频平台状态只用 published / pending / reviewing / restricted / private / removed / not-needed；抖音已发布必须写 douyin_account。",
+        "- 发布后待判断回写：backfill_check_since 之后发布、满 3 天仍没写知识回写和剩余角度判断的正式稿。",
+        "- 长期积压：来源缺失、连接不足等存量问题，比上一份日报没有变多时不影响状态，只列出数量。",
         "- 属性 schema：`20-知识` 中 kind 不在枚举内或残留 type/created/updated/knowledge_type 旧字段的笔记数。",
         f"- 待清理超期：`90-归档/90-待清理` 中放置超过 {metrics.get('cleanup_retention_days', 90)} 天的目录，确认无误后可人工删除。",
         "",

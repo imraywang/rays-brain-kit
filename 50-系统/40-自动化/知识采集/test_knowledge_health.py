@@ -33,6 +33,7 @@ class CreationHealthTests(unittest.TestCase):
                 "KNOWLEDGE_DIR",
                 "TOPIC_MAP_CANDIDATE_STATE",
                 "TOPIC_MAP_CANDIDATE_NOTE",
+                "CONFIG_FILE",
             )
         }
         health.VAULT = Path(self.temp.name)
@@ -46,6 +47,7 @@ class CreationHealthTests(unittest.TestCase):
         health.KNOWLEDGE_DIR = health.VAULT / "20-知识"
         health.TOPIC_MAP_CANDIDATE_STATE = health.VAULT / ".state/topic-map-candidates.json"
         health.TOPIC_MAP_CANDIDATE_NOTE = health.VAULT / "00-入口/10-工作台/主题地图候选.md"
+        health.CONFIG_FILE = health.VAULT / ".state/config.json"
 
     def tearDown(self) -> None:
         for name, value in self.original_paths.items():
@@ -465,6 +467,7 @@ freshness_status: stale
             "30-资料/70-人物语料/甲/索引.md",
             "| 期 | 链接 |\n|---|---|\n"
             "| 1 | [[30-资料/70-人物语料/甲/podcast/第一期\\|第一期]] |\n"
+            "[[^g1]] 指向同一篇里的块\n"
             "![[卡片.png]]\n"
             "[[60-素材/10-图片/10-封面/某期封面]]\n"
             "[[60-素材/10-图片/10-封面/某期封面/]]\n",
@@ -481,7 +484,7 @@ freshness_status: stale
 
         checked, broken, cleanup_only = health.resolve_wikilinks()
 
-        self.assertEqual(checked, 6)
+        self.assertEqual(checked, 7)
         self.assertEqual(broken, [])
         self.assertEqual(cleanup_only, [])
 
@@ -499,6 +502,157 @@ freshness_status: stale
             {"source": "20-知识/10-概念/笔记.md", "target": "不存在.png"},
         ])
         self.assertEqual(cleanup_only, [])
+
+    def write_config(self, **values: object) -> None:
+        self.write(".state/config.json", json.dumps(values, ensure_ascii=False))
+
+    def test_closeout_flags_open_candidate_sibling_and_stale_drafts(self) -> None:
+        now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
+        self.write(
+            "40-发布/50-口播视频/正式稿.md",
+            self.note('kind: video-published\nstatus: published\n'
+                      'topic_candidate: "[[10-创作/10-灵感/20-候选选题/候选]]"'),
+        )
+        self.write(
+            "10-创作/10-灵感/20-候选选题/候选.md",
+            self.note("kind: topic-candidate\nstatus: active"),
+        )
+        self.write(
+            "10-创作/25-口播草稿/另一版.md",
+            self.note('kind: oral-script\nstatus: draft\nupdated_at: "2026-10-26"\n'
+                      'supersedes: "[[40-发布/50-口播视频/正式稿]]"'),
+        )
+        self.write(
+            "10-创作/25-口播草稿/老稿.md",
+            self.note('kind: oral-script\nstatus: draft\nupdated_at: "2026-10-10"'),
+        )
+        self.write(
+            "10-创作/25-口播草稿/录完待发.md",
+            self.note('kind: oral-script\nstatus: draft\nrecording_status: recorded\n'
+                      'updated_at: "2026-10-10"'),
+        )
+
+        issues = health.publication_closeout_issues(now)
+
+        self.assertEqual(
+            [item["file"] for item in issues["open_candidates"]],
+            ["10-创作/10-灵感/20-候选选题/候选.md"],
+        )
+        self.assertEqual(
+            [item["file"] for item in issues["sibling_drafts"]],
+            ["10-创作/25-口播草稿/另一版.md"],
+        )
+        self.assertEqual(
+            [item["file"] for item in issues["stale_drafts"]],
+            ["10-创作/25-口播草稿/老稿.md"],
+        )
+
+    def test_platform_fields_need_known_status_and_douyin_account(self) -> None:
+        self.write_config(douyin_accounts=["解说号", "口播号"])
+        self.write(
+            "40-发布/50-口播视频/缺账号.md",
+            self.note("kind: video-published\nstatus: published\ndouyin_status: published"),
+        )
+        self.write(
+            "40-发布/50-口播视频/错取值.md",
+            self.note("kind: video-published\nstatus: published\n"
+                      "douyin_status: published\ndouyin_account: 小号\nbilibili_status: done"),
+        )
+        self.write(
+            "40-发布/50-口播视频/正常.md",
+            self.note("kind: video-published\nstatus: published\n"
+                      "douyin_status: private\ndouyin_account: 解说号\n"
+                      "xiaohongshu_status: not-needed"),
+        )
+
+        issues = {item["file"]: item["issue"] for item in health.platform_field_issues()}
+
+        self.assertEqual(sorted(issues), [
+            "40-发布/50-口播视频/缺账号.md", "40-发布/50-口播视频/错取值.md",
+        ])
+        self.assertIn("douyin_account", issues["40-发布/50-口播视频/缺账号.md"])
+        self.assertIn("bilibili_status", issues["40-发布/50-口播视频/错取值.md"])
+        self.assertIn("小号", issues["40-发布/50-口播视频/错取值.md"])
+
+    def test_local_paths_resolve_by_project_name_and_skip_unmounted(self) -> None:
+        media = health.VAULT / ".media/ray-explainer"
+        (media / "2026-10-25-china-ai-chain").mkdir(parents=True)
+        self.write_config(media_roots=[str(media)])
+        (health.VAULT / "60-素材/10-图片/10-封面/有").mkdir(parents=True)
+        self.write(
+            "40-发布/50-口播视频/项目名.md",
+            self.note('kind: video-published\nstatus: published\n'
+                      'video_project: 2026-10-25-china-ai-chain\n'
+                      'video_file: "/Volumes/没接的盘/x/out.mp4"\n'
+                      'cover_dir: "[[60-素材/10-图片/10-封面/有]]"'),
+        )
+        self.write(
+            "40-发布/50-口播视频/搬家.md",
+            self.note('kind: video-published\nstatus: published\n'
+                      f'video_project: "{health.VAULT}/old/2026-10-25-china-ai-chain"\n'
+                      'cover_dir: "[[60-素材/10-图片/10-封面/没有]]"'),
+        )
+
+        issues, unmounted = health.local_path_issues()
+
+        self.assertEqual(unmounted, 1)
+        self.assertEqual([item["file"] for item in issues], ["40-发布/50-口播视频/搬家.md"])
+        self.assertIn(str(media / "2026-10-25-china-ai-chain"), issues[0]["issue"])
+        self.assertIn("cover_dir", issues[0]["issue"])
+
+    def test_backfill_pending_only_counts_after_cutoff(self) -> None:
+        now = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
+        self.write_config(backfill_check_since="2026-10-27")
+        self.write(
+            "40-发布/50-口播视频/旧.md",
+            self.note('kind: video-published\nstatus: published\ncreated_at: "2026-10-20"\n'
+                      "knowledge_backfill_status: pending"),
+        )
+        self.write(
+            "40-发布/50-口播视频/新.md",
+            self.note('kind: video-published\nstatus: published\ncreated_at: "2026-10-28"\n'
+                      "knowledge_backfill_status: pending\nremaining_angles_status: not-needed"),
+        )
+        self.write(
+            "40-发布/50-口播视频/刚发.md",
+            self.note('kind: video-published\nstatus: published\ncreated_at: "2026-11-04"\n'
+                      "knowledge_backfill_status: pending"),
+        )
+
+        issues = health.backfill_pending_issues(now)
+
+        self.assertEqual([item["file"] for item in issues], ["40-发布/50-口播视频/新.md"])
+        self.assertNotIn("剩余角度", issues[0]["issue"])
+
+    def test_data_snapshots_are_not_pending_feedback(self) -> None:
+        now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
+        self.write(
+            "40-发布/00-内容反馈/2026-10-24-口播视频数据快照.md",
+            self.note('kind: data-snapshot\nsnapshot_at: "2026-10-24T19:30:00-07:00"'),
+        )
+
+        metrics = health.collect_creation_metrics(now)
+
+        self.assertEqual(metrics["pending_feedback_count"], 0)
+        self.assertEqual(metrics["feedback_schedule_issue_count"], 0)
+
+    def test_chronic_backlog_only_alerts_when_it_grows(self) -> None:
+        metrics = {
+            "active_candidate_count": 0, "stale_candidate_count": 0,
+            "active_writing_task_count": 0, "overdue_feedback_count": 0,
+            "processed_review_in_active_count": 0,
+            "underlinked_knowledge_count": 34, "knowledge_provenance_issue_count": 41,
+        }
+        previous = {"underlinked_knowledge_count": 34, "knowledge_provenance_issue_count": 40}
+
+        reasons = health.creation_alerts(metrics, previous)
+
+        self.assertEqual(reasons, ["有 41 篇长期知识来源缺失或失效（较上次 +1）"])
+        self.assertEqual(
+            health.chronic_backlog(metrics, previous),
+            ["34 篇长期知识少于 2 条有效连接（未增加）"],
+        )
+        self.assertEqual(len(health.creation_alerts(metrics)), 2)
 
     def test_flags_unresolved_frontmatter_author_link(self) -> None:
         self.write(

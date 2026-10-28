@@ -286,6 +286,14 @@ class RecordPublishedTests(unittest.TestCase):
         self.assertIn("remaining_angles_status", report)
         self.assertIn("partially-published", report)
 
+    def test_open_candidate_is_marked_published(self) -> None:
+        self.run_record()
+        topic = (self.root / "10-创作/10-灵感/20-候选选题/2026-07-19-测试候选.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("status: published", topic)
+        self.assertIn('published_file: "[[40-发布/10-X长文/2026-07-19-测试长文]]"', topic)
+
     # ---------------------------------------------------------- 写法
 
     def test_quoting_matches_the_vault_convention(self) -> None:

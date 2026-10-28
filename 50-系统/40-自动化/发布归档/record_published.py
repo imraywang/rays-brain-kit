@@ -503,6 +503,9 @@ PLATFORM_FIELDS = {
 # 一条口播视频一次发三个平台，脚本要跑三遍。视频平台的后台数据都得人去看，
 # 所以每跑一个平台就在反馈卡上立一条对应的待办。
 VIDEO_PLATFORMS = frozenset({"shipinhao", "douyin", "xiaohongshu"})
+# 候选选题在正式稿上用过四个字段名：长文用 topic / candidate，视频用 topic_candidate / topic_card
+CANDIDATE_KEYS = ("topic", "candidate", "topic_candidate", "topic_card")
+OPEN_CANDIDATE_STATUSES = frozenset({"candidate", "active", "selected", "writing", "in-progress"})
 
 
 def merge_platform_labels(existing: str, label: str) -> str:
@@ -860,8 +863,25 @@ def record(
         report.append("  - 把可复用的观点或方法写回 20-知识/，再更新 knowledge_backfill_status")
     if todo("remaining_angles_status", "").strip() not in ("complete", "not-needed"):
         report.append("  - 标记本次已用角度、保留剩余角度，再更新 remaining_angles_status")
-    topic_link = todo("topic", "").strip() or todo("candidate", "").strip()
-    if topic_link:
+    topic_link = next(
+        (todo(key, "").strip() for key in CANDIDATE_KEYS if todo(key, "").strip()), ""
+    )
+    candidate = resolve_link(topic_link) if topic_link else None
+    candidate_text = ""
+    if candidate is not None and parse_frontmatter(
+        candidate.read_text(encoding="utf-8")
+    ).get("status", "").strip() in OPEN_CANDIDATE_STATUSES:
+        # 已经发布，候选不该再占今日候选；还有剩余角度时人可以再改成 partially-published
+        candidate_text = update_frontmatter(candidate.read_text(encoding="utf-8"), {
+            "status": "published",
+            "published_file": wikilink(article),
+            "updated_at": now.isoformat(timespec="seconds"),
+        })
+        closeout_preview.append(f"候选选题 {rel(candidate)} → status: published")
+        report.append(
+            f"  - 候选选题 {rel(candidate)} 会改为 published；还有剩余角度时再改成 partially-published"
+        )
+    elif topic_link:
         report.append(f"  - 把候选选题 {wikilink_target(topic_link)} 改为 partially-published 或 closed")
 
     if dry_run:
@@ -877,6 +897,9 @@ def record(
         card.write_text(card_text, encoding="utf-8")
     if bookmark is not None and bookmark_updates:
         bookmark.write_text(new_bookmark_text, encoding="utf-8")
+    if candidate is not None and candidate_text:
+        candidate.write_text(candidate_text, encoding="utf-8")
+        report.append(f"候选选题 {rel(candidate)} 已改为 published")
     report.append("")
     report.extend(closeout_published_chain(article, closeout_date_anchor, now))
     return report

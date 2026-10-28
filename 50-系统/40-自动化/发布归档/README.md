@@ -77,8 +77,66 @@ python3 record_published.py \
 
 「发布与回流」仍有三类内容要人判断，脚本每次运行都会把还欠的列出来：把可复用的观点写回 `20-知识/` 并更新 `knowledge_backfill_status`、标记已用角度并更新 `remaining_angles_status`、把候选选题改成 `partially-published` 还是 `closed`。本地生产文件会自动收好，但这些内容判断不会被机器代做。
 
+## 平台核对（platform_sync.py）
+
+`record_published.py` 登记的是「我发了」；`platform_sync.py` 回答「后台现在是什么样」：链接、发布时间、状态（公开、私密、限流、已删）、抖音是哪个号、播放量。适合每次发完一批，或者每周对一次。
+
+它同样不碰任何平台：后台数据由人或 Claude 在**已经登录的浏览器里只读取出**，存成 JSON 交给脚本。默认只打印报告，`--write` 才落盘；只按时长和标题对上、笔记里还没有链接的，要再加 `--accept-proposed` 才写。笔记里已经记过的另一个链接绝不覆盖，而是列进「后台已经找不到」，由人判断是删了还是重发了。
+
+```
+python3 platform_sync.py --input douyin.json            # 先看报告
+python3 platform_sync.py --input douyin.json --write    # 只写已有链接的数据
+python3 platform_sync.py --input douyin.json --write --accept-proposed
+```
+
+输入格式见脚本开头的说明：`platform`、抖音必填的 `account`、`fetched_at`、`complete`（列表是否完整，决定能不能判断「后台已经找不到」）和 `items`。每条 `items` 写 `id`、`title`、`published_at`（带时区）、`duration_s`、`views`、`status`。`status` 只用 `published` / `reviewing` / `restricted` / `private` / `removed`。
+
+### 取数
+
+在创作者后台页面的控制台里运行，只读，不点任何按钮。工具输出有长度上限时，先存进 `window`，再分段取。
+
+**抖音**（`creator.douyin.com/creator-micro/content/manage`，两个号分别登录，各取一次；`author.nickname` 就是 `account`）：
+
+```js
+const all = []; let cursor = 0, more = true;
+const iso = t => { const d = new Date(t * 1000), off = -d.getTimezoneOffset(), p = n => String(Math.abs(n)).padStart(2, '0');
+  return new Date(d.getTime() + off * 60000).toISOString().slice(0, 19) + (off >= 0 ? '+' : '-') + p(Math.floor(Math.abs(off) / 60)) + ':' + p(Math.abs(off) % 60); };
+while (more) {
+  const r = await fetch(`/janus/douyin/creator/pc/work_list?status=0&count=20&max_cursor=${cursor}`, {credentials: 'include'}).then(r => r.json());
+  for (const a of r.aweme_list || []) { const s = a.status || {};
+    all.push({id: a.aweme_id, title: (a.desc || '').split('\n')[0], published_at: iso(a.create_time),
+      duration_s: (a.video?.duration || 0) / 1000, views: a.statistics?.play_count,
+      status: s.is_delete ? 'removed' : s.in_reviewing ? 'reviewing' : s.is_private ? 'private'
+            : (s.self_see || s.is_prohibited) ? 'restricted' : 'published'}); }
+  more = r.has_more; cursor = r.max_cursor;
+}
+window.__items = all; all.length
+```
+
+后台按浏览器时区显示时间，上面的 `iso` 会带上当地偏移，不用手算。
+
+**小红书**（`creator.xiaohongshu.com/new/note-manager`，「全部」标签，往下滚到要核对的日期）：每张笔记卡的 `data-impression` 里有 24 位 `noteId`，卡片文字依次是时长、标题、发布时间（北京时间）和数据。
+
+```js
+[...document.querySelectorAll('[data-impression]')].map(e => {
+  const id = (e.getAttribute('data-impression').match(/[0-9a-f]{24}/) || [])[0];
+  const t = e.innerText.split('\n').map(x => x.trim()).filter(Boolean);
+  const time = t.find(x => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(x));
+  const dur = t.find(x => /^\d{2}:\d{2}$/.test(x));
+  return id && {id, title: t.find(x => x !== dur && x !== time && !/^\d+$/.test(x) && x !== '置顶' && x !== '封面待PK'),
+    published_at: time && time.replace(' ', 'T') + ':00+08:00',
+    duration_s: dur && (+dur.slice(0, 2) * 60 + +dur.slice(3)), views: +t[t.indexOf(time) + 1] || 0, status: 'published'};
+}).filter(Boolean)
+```
+
+「审核中」「未通过」标签里的笔记分别记成 `reviewing` 和 `restricted`。
+
+**YouTube** 用 Data API 的 `videos.list?part=snippet,contentDetails,statistics,status`：`id`、`snippet.title`、`snippet.publishedAt`、`contentDetails.duration`（换成秒）、`statistics.viewCount`，`status.privacyStatus` 为 `private` / `unlisted` 时记 `private`。
+
+**视频号**没有公开网页链接，脚本只回填状态和播放量。
+
 ## 测试
 
-`python3 -m unittest test_record_published`
+`python3 -m unittest test_record_published test_platform_sync`
 
 用 `fake_vault.py` 在临时目录里搭一个小知识库，字段名和链接形状照抄真实库，不碰真正的知识库。

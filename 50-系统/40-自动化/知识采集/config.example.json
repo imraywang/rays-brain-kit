@@ -17,5 +17,10 @@
     "AI Agent 与工作流",
     "个人知识库",
     "内容生产系统"
-  ]
+  ],
+  "media_roots": [
+    "~/Movies/explainer"
+  ],
+  "douyin_accounts": [],
+  "backfill_check_since": ""
 }
