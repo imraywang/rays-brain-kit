@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按正文检索 20-知识：写稿调研之前先看长期知识里已经有什么。
+"""按正文检索长期知识、过往调研和已发布内容：写稿调研之前先看库里已经有什么。
 
 长期知识的标题是一整句论点（「技术扩散的中介窗口」），选题用的是另一套词（「企业上 AI」
 「前半年看不到效果」），只按文件名找几乎找不到。这里把标题、别名和正文一起做 BM25：
@@ -32,7 +32,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 VAULT = Path(os.environ.get("RAYS_BRAIN", str(HERE.parents[2]))).resolve()
 KNOWLEDGE_REL = "20-知识"
-SKIP_PARTS = {"70-知识地图"}  # 地图是索引，不是可以直接调用的知识
+# 三个来源寿命不同，分开检索、分组输出：
+# 长期知识（机制、类比、观点，几年不过期）、过往调研（带日期的事实，会过期）、已发布内容（讲法和反馈）
+CORPORA = {
+    "knowledge": {"label": "长期知识", "root": KNOWLEDGE_REL, "kinds": None},
+    "research": {"label": "过往调研", "root": "30-资料/10-自主调研", "kinds": None},
+    "published": {"label": "已发布内容", "root": "40-发布",
+                  "kinds": {"article-published", "video-published"}},
+}
+DEFAULT_LIMITS = {"knowledge": 8, "research": 5, "published": 5}
+SKIP_PARTS = {"70-知识地图", "00-内容反馈"}  # 地图是索引；反馈卡和数据快照不是内容
+DATE_PREFIX = re.compile(r"(\d{4}-\d{2}-\d{2})")
+TIMELINE_LINE = re.compile(r"^-\s*(\d{4}-\d{2}-\d{2})\s", flags=re.M)
 TITLE_WEIGHT = 3
 ALIAS_WEIGHT = 2
 K1, B = 1.2, 0.75
@@ -88,18 +99,45 @@ class Note:
     aliases: str
     body: str
     has_primary_source: bool
+    date: str = ""
+    timeline_count: int = 0
+    timeline_latest: str = ""
     counts: Counter = field(default_factory=Counter)
     length: int = 0
 
 
-def load_notes(vault: Path) -> list[Note]:
+def note_date(meta: dict[str, str], path: Path, root: Path) -> str:
+    """调研看创建日期或目录名里的日期；已发布内容看确认发布时间。"""
+    for key in ("publication_confirmed_at", "created_at", "date"):
+        match = DATE_PREFIX.match(meta.get(key, "").strip())
+        if match:
+            return match.group(1)
+    for part in reversed(path.relative_to(root).parts):
+        match = DATE_PREFIX.match(part)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def timeline_dates(body: str) -> list[str]:
+    match = re.search(r"^##\s*时间线\s*$(.*?)(?=^##\s|\Z)", body, flags=re.M | re.S)
+    return TIMELINE_LINE.findall(match.group(1)) if match else []
+
+
+def load_notes(vault: Path, corpus: str = "knowledge") -> list[Note]:
+    spec = CORPORA[corpus]
     notes: list[Note] = []
-    root = vault / KNOWLEDGE_REL
+    root = vault / spec["root"]
+    if not root.is_dir():
+        return notes
     for path in sorted(root.rglob("*.md")):
         if path.name.lower() == "readme.md" or SKIP_PARTS & set(path.relative_to(root).parts):
             continue
-        meta, body = split_note(path.read_text(encoding="utf-8", errors="replace"))
-        body = readable(body)
+        meta, raw_body = split_note(path.read_text(encoding="utf-8", errors="replace"))
+        if spec["kinds"] and meta.get("kind") not in spec["kinds"]:
+            continue
+        dates = timeline_dates(raw_body)
+        body = readable(raw_body)
         heading = re.search(r"^#\s+(.+)$", body, flags=re.M)
         title = meta.get("title") or (heading.group(1).strip() if heading else path.stem)
         sources = " ".join(meta.get(key, "") for key in ("source_url", "sources"))
@@ -110,6 +148,9 @@ def load_notes(vault: Path) -> list[Note]:
             aliases=meta.get("aliases", "").strip("[]"),
             body=body,
             has_primary_source="http" in sources,
+            date=note_date(meta, path, root),
+            timeline_count=len(dates),
+            timeline_latest=max(dates) if dates else "",
         )
         for token in tokens(note.title):
             note.counts[token] += TITLE_WEIGHT
@@ -135,8 +176,9 @@ def best_line(note: Note, query_tokens: set[str], terms: list[str]) -> str:
     return best[:120] + ("…" if len(best) > 120 else "")
 
 
-def search(vault: Path, terms: list[str], limit: int = 8) -> tuple[list[dict], int]:
-    notes = load_notes(vault)
+def search(vault: Path, terms: list[str], limit: int = 8,
+           corpus: str = "knowledge") -> tuple[list[dict], int]:
+    notes = load_notes(vault, corpus)
     if not notes:
         return [], 0
     query_tokens = Counter(token for term in terms for token in tokens(term))
@@ -191,37 +233,80 @@ def search(vault: Path, terms: list[str], limit: int = 8) -> tuple[list[dict], i
             "kind": note.kind,
             "score": round(score, 2),
             "matched_terms": exact,
+            "named": bool(named),
             "coverage": round(coverage / total_idf, 2),
             "has_primary_source": note.has_primary_source,
+            "date": note.date,
+            "timeline_count": note.timeline_count,
+            "timeline_latest": note.timeline_latest,
             "line": best_line(note, set(query_tokens), terms),
         })
     results.sort(key=lambda item: -item["score"])
-    if results:
-        floor = results[0]["score"] * 0.35
-        results = [item for item in results if item["score"] >= floor]
+    # 相对门槛只按普通命中算：标题或别名完全命中的档案加分很大，不能把其他相关笔记挤掉
+    plain = [item["score"] for item in results if not item["named"]]
+    if plain:
+        floor = max(plain) * 0.35
+        results = [item for item in results if item["named"] or item["score"] >= floor]
     return results[:limit], len(notes)
 
 
-def markdown(terms: list[str], results: list[dict], total: int, today: str) -> str:
-    lines = [f"### 知识库预检（{today}）", "", f"检索词：{'、'.join(terms)}（20-知识 共 {total} 篇）", ""]
-    if not results:
-        lines.append("- 无相关")
-    for item in results:
-        source = "有一手出处" if item["has_primary_source"] else "没有外部出处，引用前回原始资料核对"
-        line = f"：「{item['line']}」" if item["line"] else ""
-        matched = "、".join(item["matched_terms"])
-        weak = "弱相关 · " if item["coverage"] < 0.6 else ""
-        lines.append(
-            f"- [[{item['file']}|{item['title']}]]（{weak}{item['kind'] or '未标类型'} · 命中 {matched} · {source}）{line}"
-        )
-    lines += ["", "用上的在正文素材里注明；看过但不用的保留在这里，不用删。"]
+def search_all(vault: Path, terms: list[str],
+               limits: dict[str, int] | None = None) -> dict[str, tuple[list[dict], int]]:
+    limits = {**DEFAULT_LIMITS, **(limits or {})}
+    return {corpus: search(vault, terms, limits[corpus], corpus) for corpus in CORPORA}
+
+
+def age(day: str, today: str) -> str:
+    try:
+        days = (date.fromisoformat(today) - date.fromisoformat(day)).days
+    except ValueError:
+        return ""
+    return "今天" if days <= 0 else f"{days} 天前"
+
+
+def item_line(corpus: str, item: dict, today: str) -> str:
+    link = f"[[{item['file']}|{item['title']}]]"
+    tags: list[str] = []
+    if item["coverage"] < 0.6:
+        tags.append("弱相关")
+    if corpus == "knowledge":
+        tags.append(item["kind"] or "未标类型")
+        if item["timeline_count"]:
+            tags.append(f"时间线 {item['timeline_count']} 条，最新 {item['timeline_latest']}")
+    elif item["date"]:
+        tags.append(f"{item['date']}（{age(item['date'], today)}）")
+    tags.append("命中 " + "、".join(item["matched_terms"]))
+    if corpus == "knowledge":
+        tags.append("有一手出处" if item["has_primary_source"] else "没有外部出处，引用前回原始资料核对")
+    line = f"：「{item['line']}」" if item["line"] else ""
+    return f"- {link}（{' · '.join(tags)}）{line}"
+
+
+GROUP_HINTS = {
+    "knowledge": "机制、类比、观点，可以直接当弹药；对象档案的时间线是上次查到的事实。",
+    "research": "带日期的事实会过期：看清楚截至哪天，只补之后的变化，数字用前重新核对。",
+    "published": "看上次怎么讲的、用了什么类比，避免重复，也可以接着讲。",
+}
+
+
+def markdown(terms: list[str], groups: dict[str, tuple[list[dict], int]], today: str) -> str:
+    lines = [f"### 知识库预检（{today}）", "", f"检索词：{'、'.join(terms)}", ""]
+    for corpus, (results, total) in groups.items():
+        label = CORPORA[corpus]["label"]
+        lines.append(f"**{label}**（{CORPORA[corpus]['root']} 共 {total} 篇）：{GROUP_HINTS[corpus]}")
+        lines.append("")
+        lines.extend(item_line(corpus, item, today) for item in results)
+        if not results:
+            lines.append("- 无相关")
+        lines.append("")
+    lines.append("用上的在正文素材里注明；看过但不用的保留在这里，不用删。")
     return "\n".join(lines)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="按正文检索 20-知识")
     parser.add_argument("terms", nargs="+", help="检索词：选题、核心判断里的词、可能的类比或机制")
-    parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--limit", type=int, default=0, help="每组最多几条；默认长期知识 8、调研和已发布各 5")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     parser.add_argument("--vault", default=str(VAULT), help="知识库根目录")
     args = parser.parse_args()
@@ -229,12 +314,16 @@ def main() -> int:
     if not (vault / KNOWLEDGE_REL).is_dir():
         print(f"找不到 {vault / KNOWLEDGE_REL}", file=sys.stderr)
         return 1
-    results, total = search(vault, args.terms, args.limit)
+    limits = {corpus: args.limit for corpus in CORPORA} if args.limit else None
+    groups = search_all(vault, args.terms, limits)
     if args.json:
-        print(json.dumps({"terms": args.terms, "total": total, "results": results},
-                         ensure_ascii=False, indent=2))
+        print(json.dumps({
+            "terms": args.terms,
+            "groups": {corpus: {"total": total, "results": results}
+                       for corpus, (results, total) in groups.items()},
+        }, ensure_ascii=False, indent=2))
     else:
-        print(markdown(args.terms, results, total, date.today().isoformat()))
+        print(markdown(args.terms, groups, date.today().isoformat()))
     return 0
 
 

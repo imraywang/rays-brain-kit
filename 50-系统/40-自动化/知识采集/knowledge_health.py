@@ -1170,12 +1170,32 @@ def backfill_pending_issues(now: datetime) -> list[dict[str, str]]:
             )
             if meta.get(key, "pending").strip() in {"", "pending"}
         ]
-        if pending:
+        problems = ["、".join(pending) + "还没判断（写 complete 或 not-needed）"] if pending else []
+        unanswered = unanswered_backflow(path.read_text(encoding="utf-8", errors="replace"))
+        if unanswered:
+            problems.append("「回流」没答：" + "、".join(unanswered))
+        if problems:
             issues.append({
                 "file": path.relative_to(VAULT).as_posix(),
-                "issue": "、".join(pending) + "还没判断（写 complete 或 not-needed）",
+                "issue": "；".join(problems),
             })
     return issues
+
+
+BACKFLOW_QUESTIONS = ("机制与类比", "带日期的事实", "讲法与反馈")
+
+
+def unanswered_backflow(text: str) -> list[str]:
+    """正式稿「回流」三问：机制进长期知识、带日期的事实进对象时间线、讲法留在本篇。每行写链接或「无」。"""
+    match = re.search(r"^##\s*回流\s*$(.*?)(?=^##\s|\Z)", text, flags=re.M | re.S)
+    if not match:
+        return list(BACKFLOW_QUESTIONS)
+    answers: dict[str, str] = {}
+    for line in match.group(1).splitlines():
+        for question in BACKFLOW_QUESTIONS:
+            if line.lstrip("-* ").startswith(question):
+                answers[question] = re.split(r"[：:]", line, maxsplit=1)[-1].strip() if re.search(r"[：:]", line) else ""
+    return [question for question in BACKFLOW_QUESTIONS if not answers.get(question)]
 
 
 def has_topic_freshness_anchor(meta: dict[str, str]) -> bool:
@@ -1598,7 +1618,7 @@ def creation_alerts(
         )
     if metrics.get("backfill_pending_count", 0):
         reasons.append(
-            f"有 {metrics['backfill_pending_count']} 篇发布满 3 天还没判断知识回写和剩余角度"
+            f"有 {metrics['backfill_pending_count']} 篇发布满 3 天还没答完回流三问或判断回写"
         )
     if metrics.get("published_active_residue_count", 0):
         reasons.append(
@@ -2250,7 +2270,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         f"| 没做知识库预检 | {metrics.get('missing_precheck_count', 0)} | 口播草稿调研前要先查 20-知识 |",
         f"| 本地路径打不开 | {metrics.get('local_path_issue_count', 0)} | 外置盘未接上的 {metrics.get('media_unmounted_count', 0)} 处不计 |",
         f"| 平台字段待补 | {metrics.get('platform_field_issue_count', 0)} | 状态取值和抖音账号 |",
-        f"| 发布后待判断回写 | {metrics.get('backfill_pending_count', 0)} | 发布满 3 天应写 complete 或 not-needed |",
+        f"| 发布后待判断回写 | {metrics.get('backfill_pending_count', 0)} | 发布满 3 天应答完「回流」三问并写 complete 或 not-needed |",
         "",
         "## 主题地图候选",
         "",
@@ -2382,7 +2402,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "- 没做知识库预检：knowledge_precheck_since 之后新建的口播草稿，「素材与来源」里没有「知识库预检」小节，或小节里既没有知识链接也没写「无相关」。",
         "- 本地路径打不开：正式稿里 video_project、video_file、封面等路径不存在；只写项目名时到 config 的 media_roots 里找；外置盘没接上时不算错。",
         "- 平台字段待补：视频平台状态只用 published / pending / reviewing / restricted / private / removed / not-needed；抖音已发布必须写 douyin_account。",
-        "- 发布后待判断回写：backfill_check_since 之后发布、满 3 天仍没写知识回写和剩余角度判断的正式稿。",
+        "- 发布后待判断回写：backfill_check_since 之后发布、满 3 天仍没写知识回写和剩余角度判断，或「回流」三问（机制与类比、带日期的事实、讲法与反馈）没答完的正式稿。每行写链接或「无」。",
         "- 长期积压：来源缺失、连接不足等存量问题，比上一份日报没有变多时不影响状态，只列出数量。",
         "- 属性 schema：`20-知识` 中 kind 不在枚举内或残留 type/created/updated/knowledge_type 旧字段的笔记数。",
         f"- 待清理超期：`90-归档/90-待清理` 中放置超过 {metrics.get('cleanup_retention_days', 90)} 天的目录，确认无误后可人工删除。",

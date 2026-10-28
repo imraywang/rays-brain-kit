@@ -655,6 +655,22 @@ freshness_status: stale
         self.assertEqual(metrics["pending_feedback_count"], 0)
         self.assertEqual(metrics["feedback_schedule_issue_count"], 0)
 
+    def test_backflow_needs_all_three_answers(self) -> None:
+        now = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
+        self.write_config(backfill_check_since="2026-10-27")
+        done = ("## 回流\n\n- 机制与类比 → 长期知识：[[20-知识/10-概念/技术扩散的中介窗口]]\n"
+                "- 带日期的事实 → 对象档案时间线：无\n- 讲法与反馈 → 留在本篇：渗流网格开场留存高\n")
+        half = "## 回流\n\n- 机制与类比 → 长期知识：无\n- 带日期的事实 → 对象档案时间线：\n"
+        meta = ('kind: video-published\nstatus: published\ncreated_at: "2026-10-28"\n'
+                "knowledge_backfill_status: complete\nremaining_angles_status: not-needed")
+        self.write("40-发布/50-口播视频/答完.md", self.note(meta, done))
+        self.write("40-发布/50-口播视频/没答完.md", self.note(meta, half))
+
+        issues = {item["file"]: item["issue"] for item in health.backfill_pending_issues(now)}
+
+        self.assertEqual(list(issues), ["40-发布/50-口播视频/没答完.md"])
+        self.assertIn("带日期的事实、讲法与反馈", issues["40-发布/50-口播视频/没答完.md"])
+
     def test_chronic_backlog_only_alerts_when_it_grows(self) -> None:
         metrics = {
             "active_candidate_count": 0, "stale_candidate_count": 0,

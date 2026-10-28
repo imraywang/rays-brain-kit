@@ -63,15 +63,28 @@ class KnowledgeSearchTests(unittest.TestCase):
         self.assertEqual(total, 14)
         self.assertNotIn("AI 商业结构", [item["title"] for item in results])
 
-    def test_markdown_says_no_match_and_flags_sources(self) -> None:
-        empty = search.markdown(["宝可梦"], [], 14, "2026-10-28")
-        self.assertIn("### 知识库预检（2026-10-28）", empty)
-        self.assertIn("- 无相关", empty)
-        results, total = search.search(self.vault, ["电气化", "生产率"])
-        text = search.markdown(["电气化", "生产率"], results, total, "2026-10-28")
-        self.assertIn("[[20-知识/10-概念/技术扩散的中介窗口|技术扩散的中介窗口]]", text)
-        self.assertIn("有一手出处", text)
+    def test_markdown_groups_sources_and_says_no_match(self) -> None:
+        self.write("30-资料/10-自主调研/2026-10-25-产业链/调研.md", note(
+            "research", "国内 AI 产业链", "光模块：中际旭创 2026-10-23 收盘市值……", 'created_at: "2026-10-25"\n'))
+        self.write("40-发布/50-口播视频/2026-10-25-产业链.md", note(
+            "video-published", "你用AI没花钱", "第四站，光模块。", 'publication_confirmed_at: "2026-10-25T21:06:00-07:00"\n'))
+        self.write("40-发布/00-内容反馈/快照.md", note("data-snapshot", "快照", "光模块 播放量"))
+        groups = search.search_all(self.vault, ["光模块"])
+        text = search.markdown(["光模块"], groups, "2026-10-28")
+        self.assertIn("### 知识库预检（2026-10-28）", text)
+        self.assertIn("**长期知识**", text)
+        self.assertIn("- 无相关", text)  # 长期知识里没有
+        self.assertIn("[[30-资料/10-自主调研/2026-10-25-产业链/调研|国内 AI 产业链]]（2026-10-25（3 天前）", text)
+        self.assertIn("[[40-发布/50-口播视频/2026-10-25-产业链|你用AI没花钱]]", text)
+        self.assertNotIn("快照", text)
 
+    def test_knowledge_hit_shows_source_and_timeline(self) -> None:
+        self.write("20-知识/20-人物与组织/长鑫.md", note(
+            "entity", "长鑫", "做内存。\n\n## 时间线\n\n- 2026-07-27 科创板上市（来源：x）\n- 2026-05-01 递交招股书（来源：y）\n"))
+        groups = search.search_all(self.vault, ["电气化", "长鑫"])
+        text = search.markdown(["电气化", "长鑫"], groups, "2026-10-28")
+        self.assertIn("有一手出处", text)
+        self.assertIn("时间线 2 条，最新 2026-07-27", text)
 
 if __name__ == "__main__":
     unittest.main()
