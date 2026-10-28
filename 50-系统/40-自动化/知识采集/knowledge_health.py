@@ -1002,10 +1002,20 @@ def publication_closeout_issues(now: datetime) -> dict[str, list[dict[str, str]]
 
     sibling_drafts: list[dict[str, str]] = []
     stale_drafts: list[dict[str, str]] = []
+    missing_precheck: list[dict[str, str]] = []
+    precheck_since = str(health_config().get("knowledge_precheck_since", "")).strip()
     for root in (ARTICLE_DRAFT_DIR, ORAL_DRAFT_DIR):
         for path in markdown_notes(root):
-            meta = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            meta = parse_frontmatter(text)
             relative_path = path.relative_to(VAULT).as_posix()
+            created = meta.get("created_at", "").strip()[:10]
+            if root == ORAL_DRAFT_DIR and precheck_since and created >= precheck_since \
+                    and not has_knowledge_precheck(text):
+                missing_precheck.append({
+                    "file": relative_path,
+                    "issue": "调研前没做知识库预检（knowledge_search.py）",
+                })
             reason = related = ""
             for target in link_targets(meta.get("supersedes", "")):
                 # 新稿替代的是已经发布的正式稿时，新稿本身也多半已经发出去
@@ -1035,7 +1045,17 @@ def publication_closeout_issues(now: datetime) -> dict[str, list[dict[str, str]]
         "open_candidates": open_candidates,
         "sibling_drafts": sibling_drafts,
         "stale_drafts": stale_drafts,
+        "missing_precheck": missing_precheck,
     }
+
+
+def has_knowledge_precheck(text: str) -> bool:
+    """「知识库预检」小节里要么有知识链接，要么明确写了「无相关」；模板里的说明不算。"""
+    match = re.search(r"^###\s*知识库预检.*?$(.*?)(?=^#{1,3}\s|\Z)", text, flags=re.M | re.S)
+    if not match:
+        return False
+    section = match.group(1)
+    return "[[20-知识/" in section or "无相关" in section
 
 
 def health_config() -> dict[str, Any]:
@@ -1427,6 +1447,8 @@ def collect_creation_metrics(now: datetime) -> dict[str, Any]:
         "sibling_drafts": closeout["sibling_drafts"],
         "stale_draft_count": len(closeout["stale_drafts"]),
         "stale_drafts": closeout["stale_drafts"],
+        "missing_precheck_count": len(closeout["missing_precheck"]),
+        "missing_precheck": closeout["missing_precheck"],
         "local_path_issue_count": len(path_issues),
         "local_path_issues": path_issues,
         "media_unmounted_count": media_unmounted,
@@ -1561,6 +1583,10 @@ def creation_alerts(
     if metrics.get("stale_draft_count", 0):
         reasons.append(
             f"有 {metrics['stale_draft_count']} 份草稿超过 {STALE_DRAFT_DAYS} 天没有推进"
+        )
+    if metrics.get("missing_precheck_count", 0):
+        reasons.append(
+            f"有 {metrics['missing_precheck_count']} 份口播草稿调研前没做知识库预检"
         )
     if metrics.get("local_path_issue_count", 0):
         reasons.append(
@@ -2221,6 +2247,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         f"| 已发布但候选未关 | {metrics.get('published_open_candidate_count', 0)} | 正式稿的 topic_candidate 指向的候选应关闭 |",
         f"| 同一选题已发布的草稿 | {metrics.get('sibling_draft_count', 0)} | 被替代的旧版或另一版，确认已发还是作废 |",
         f"| 停滞草稿 | {metrics.get('stale_draft_count', 0)} | 草稿区超过 {STALE_DRAFT_DAYS} 天没推进 |",
+        f"| 没做知识库预检 | {metrics.get('missing_precheck_count', 0)} | 口播草稿调研前要先查 20-知识 |",
         f"| 本地路径打不开 | {metrics.get('local_path_issue_count', 0)} | 外置盘未接上的 {metrics.get('media_unmounted_count', 0)} 处不计 |",
         f"| 平台字段待补 | {metrics.get('platform_field_issue_count', 0)} | 状态取值和抖音账号 |",
         f"| 发布后待判断回写 | {metrics.get('backfill_pending_count', 0)} | 发布满 3 天应写 complete 或 not-needed |",
@@ -2307,6 +2334,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         ("已发布但候选未关", metrics.get("published_open_candidates", [])),
         ("同一选题已发布的草稿", metrics.get("sibling_drafts", [])),
         ("停滞草稿", metrics.get("stale_drafts", [])),
+        ("没做知识库预检", metrics.get("missing_precheck", [])),
         ("本地路径打不开", metrics.get("local_path_issues", [])),
         ("平台字段待补", metrics.get("platform_field_issues", [])),
         ("发布后待判断回写", metrics.get("backfill_pending_issues", [])),
@@ -2351,6 +2379,7 @@ def daily_report(metrics: dict[str, Any]) -> str:
         "- 已发布但候选未关：正式稿的 topic_candidate / topic_card 指向的候选仍是 candidate 或 active。",
         "- 同一选题已发布的草稿：草稿的 supersedes 指向已发布或已归档的稿子，或与某篇正式稿共用 topic_candidate。",
         f"- 停滞草稿：口播草稿和文章草稿里 {STALE_DRAFT_DAYS} 天没有更新、也没有录完的稿子。",
+        "- 没做知识库预检：knowledge_precheck_since 之后新建的口播草稿，「素材与来源」里没有「知识库预检」小节，或小节里既没有知识链接也没写「无相关」。",
         "- 本地路径打不开：正式稿里 video_project、video_file、封面等路径不存在；只写项目名时到 config 的 media_roots 里找；外置盘没接上时不算错。",
         "- 平台字段待补：视频平台状态只用 published / pending / reviewing / restricted / private / removed / not-needed；抖音已发布必须写 douyin_account。",
         "- 发布后待判断回写：backfill_check_since 之后发布、满 3 天仍没写知识回写和剩余角度判断的正式稿。",

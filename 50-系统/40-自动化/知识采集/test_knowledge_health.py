@@ -547,6 +547,25 @@ freshness_status: stale
             ["10-创作/25-口播草稿/老稿.md"],
         )
 
+    def test_new_oral_drafts_need_knowledge_precheck(self) -> None:
+        now = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+        self.write_config(knowledge_precheck_since="2026-10-28")
+        template_text = "### 知识库预检\n\n调研之前先跑 knowledge_search.py，替换掉这两行。\n\n### 调研与出处\n"
+        self.write("10-创作/25-口播草稿/没查.md", self.note(
+            'kind: oral-script\nstatus: draft\ncreated_at: "2026-10-28"', template_text))
+        self.write("10-创作/25-口播草稿/查过无相关.md", self.note(
+            'kind: oral-script\nstatus: draft\ncreated_at: "2026-10-28"',
+            "### 知识库预检（2026-10-28）\n\n- 无相关\n\n### 调研与出处\n"))
+        self.write("10-创作/25-口播草稿/查过有命中.md", self.note(
+            'kind: oral-script\nstatus: draft\ncreated_at: "2026-10-29"',
+            "### 知识库预检\n\n- [[20-知识/10-概念/某概念|某概念]]\n"))
+        self.write("10-创作/25-口播草稿/旧稿.md", self.note(
+            'kind: oral-script\nstatus: draft\ncreated_at: "2026-10-20"', "没有预检"))
+
+        issues = health.publication_closeout_issues(now)["missing_precheck"]
+
+        self.assertEqual([item["file"] for item in issues], ["10-创作/25-口播草稿/没查.md"])
+
     def test_platform_fields_need_known_status_and_douyin_account(self) -> None:
         self.write_config(douyin_accounts=["解说号", "口播号"])
         self.write(

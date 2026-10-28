@@ -22,5 +22,6 @@
     "~/Movies/explainer"
   ],
   "douyin_accounts": [],
-  "backfill_check_since": ""
+  "backfill_check_since": "",
+  "knowledge_precheck_since": ""
 }
